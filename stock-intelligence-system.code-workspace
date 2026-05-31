@@ -1,0 +1,24 @@
+{
+  "folders": [
+    { "name": "📦 root",     "path": "." },
+    { "name": "🐍 backend",  "path": "backend" },
+    { "name": "⚛ frontend", "path": "frontend" },
+    { "name": "📚 docs",     "path": "docs" }
+  ],
+  "settings": {
+    "window.title": "Stock Intel — ${rootName}${separator}${activeEditorShort}",
+    "terminal.integrated.cwd": "${workspaceFolder:📦 root}"
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-python.python",
+      "ms-python.vscode-pylance",
+      "charliermarsh.ruff",
+      "dbaeumer.vscode-eslint",
+      "esbenp.prettier-vscode",
+      "bradlc.vscode-tailwindcss",
+      "ms-azuretools.vscode-docker"
+    ]
+  }
+}
+

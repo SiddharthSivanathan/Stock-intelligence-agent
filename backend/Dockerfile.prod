@@ -1,0 +1,71 @@
+# syntax=docker/dockerfile:1.7
+# =============================================================================
+# Production backend image — multi-stage, non-root, healthchecked.
+# Builds deps in a fat builder stage, copies the virtualenv into a slim runtime.
+# =============================================================================
+
+# ---------- Stage 1: builder ----------
+FROM python:3.12-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        build-essential \
+        libpq-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+# Build into an isolated venv we can copy whole.
+RUN python -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
+WORKDIR /build
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+# ---------- Stage 2: runtime ----------
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH=/opt/venv/bin:$PATH
+
+# Runtime-only system libs: libpq for asyncpg, libxml/libxslt for lxml (via yfinance),
+# curl for the HEALTHCHECK probe.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        libpq5 \
+        libxml2 \
+        libxslt1.1 \
+        curl \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/venv /opt/venv
+
+# Non-root user — UID 1000 to match common host UIDs for any mounted volumes.
+RUN useradd --create-home --shell /bin/bash --uid 1000 app
+WORKDIR /app
+COPY --chown=app:app . /app
+
+# fastembed model cache (mounted as a named volume in compose)
+RUN mkdir -p /var/cache/fastembed && chown app:app /var/cache/fastembed
+ENV FASTEMBED_CACHE_PATH=/var/cache/fastembed
+
+USER app
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+    CMD curl -fsS http://localhost:8000/api/v1/health || exit 1
+
+# 2 workers: tune to roughly 2x CPU for I/O-bound async workloads.
+# --proxy-headers + --forwarded-allow-ips=* makes scheme/host correct behind nginx.
+CMD ["uvicorn", "app.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--workers", "2", \
+     "--proxy-headers", \
+     "--forwarded-allow-ips=*"]

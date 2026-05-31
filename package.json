@@ -1,0 +1,31 @@
+{
+  "name": "stock-intelligence-system",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Multi-agent AI stock intelligence platform — root convenience scripts. Real code lives in backend/ and frontend/.",
+  "scripts": {
+    "dev": "docker compose up",
+    "up": "docker compose up -d",
+    "down": "docker compose down",
+    "rebuild": "docker compose up -d --build",
+    "logs": "docker compose logs -f",
+    "logs:backend": "docker compose logs -f backend",
+    "logs:frontend": "docker compose logs -f frontend",
+    "ps": "docker compose ps",
+    "migrate": "docker compose exec backend alembic upgrade head",
+    "migrate:new": "docker compose exec backend alembic revision --autogenerate -m",
+    "pytest": "docker compose exec backend pytest -q",
+    "psql": "docker compose exec postgres psql -U stockai -d stockai",
+    "redis-cli": "docker compose exec redis redis-cli",
+    "frontend:dev": "cd frontend && npm run dev",
+    "frontend:build": "cd frontend && npm run build",
+    "frontend:install": "cd frontend && npm install",
+    "prod:up": "docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build",
+    "prod:down": "docker compose -f docker-compose.yml -f docker-compose.prod.yml down",
+    "health": "curl -s http://localhost:8000/api/v1/health",
+    "ready": "curl -s http://localhost:8000/api/v1/ready"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

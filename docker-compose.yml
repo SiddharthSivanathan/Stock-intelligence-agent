@@ -1,0 +1,115 @@
+# =============================================================================
+# Stack:
+#   - postgres : transactional store (users, watchlists, insights, agent logs)
+#   - redis    : cache + streams (real-time pipeline)
+#   - chroma   : vector store for the RAG pipeline
+#   - backend  : FastAPI app with hot-reload mounted from ./backend
+#
+# Ollama is intentionally NOT in this compose file.
+# Run it natively on Windows (https://ollama.com) and the backend reaches it
+# via http://host.docker.internal:11434.
+# =============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sis_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-stockai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stockai}
+      POSTGRES_DB: ${POSTGRES_DB:-stockai}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stockai}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: sis_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  chroma:
+    image: chromadb/chroma:0.5.20
+    container_name: sis_chroma
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sis_backend
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      CHROMA_HOST: chroma
+      # fastembed caches downloaded ONNX models here; volume below persists them
+      FASTEMBED_CACHE_PATH: /var/cache/fastembed
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chroma:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - fastembed_cache:/var/cache/fastembed
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --reload-dir /app/app
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: sis_frontend
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000/api/v1
+      VITE_WS_URL: ws://localhost:8000/api/v1/ws
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      # Named volume so node_modules from the image is preserved when the
+      # source is bind-mounted on top.
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  chroma_data:
+  fastembed_cache:
+  frontend_node_modules:

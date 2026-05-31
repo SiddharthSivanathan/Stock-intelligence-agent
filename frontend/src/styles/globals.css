@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Bloomberg-glass dark palette */
+    --bg: 222 47% 5%;
+    --panel: 222 28% 9%;
+    --panel-2: 222 24% 13%;
+    --border: 222 20% 18%;
+    --text: 210 20% 92%;
+    --text-muted: 215 14% 56%;
+    --accent: 158 64% 52%;     /* emerald */
+    --danger: 350 84% 60%;     /* rose */
+    --warning: 38 92% 50%;     /* amber */
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background:
+      radial-gradient(ellipse 80% 50% at 50% -10%, hsl(var(--accent) / 0.07), transparent 60%),
+      hsl(var(--bg));
+    background-attachment: fixed;
+  }
+
+  /* Tabular numerals for prices everywhere */
+  .font-mono,
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Tasteful scrollbars on dark */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 5px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--text-muted) / 0.5);
+  }
+}
+
+@layer components {
+  .glass {
+    background: hsl(var(--panel) / 0.6);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid hsl(var(--border) / 0.6);
+  }
+
+  .glass-strong {
+    background: hsl(var(--panel) / 0.85);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid hsl(var(--border));
+  }
+
+  .text-up {
+    color: hsl(var(--accent));
+  }
+
+  .text-down {
+    color: hsl(var(--danger));
+  }
+}
