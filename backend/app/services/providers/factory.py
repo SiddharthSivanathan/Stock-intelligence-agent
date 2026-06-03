@@ -18,7 +18,7 @@ from app.services.providers.yfinance_provider import YFinanceProvider
 
 
 @lru_cache(maxsize=1)
-def _yfinance() -> MarketDataProvider:
+def get_yfinance_provider() -> MarketDataProvider:
     return YFinanceProvider()
 
 
@@ -30,12 +30,12 @@ def _finnhub() -> MarketDataProvider | None:
 
 
 def get_quote_provider() -> MarketDataProvider:
-    return _finnhub() or _yfinance()
+    return _finnhub() or get_yfinance_provider()
 
 
 def get_history_provider() -> MarketDataProvider:
-    return _yfinance()
+    return get_yfinance_provider()
 
 
 def get_profile_provider() -> MarketDataProvider:
-    return _finnhub() or _yfinance()
+    return _finnhub() or get_yfinance_provider()

@@ -15,6 +15,7 @@ import logging
 
 import yfinance as yf
 
+from app.config import settings
 from app.core.cache import cache_get, cache_set
 from app.core.exceptions import NotFoundError, UpstreamError
 from app.schemas.market import Candle, CompanyProfile, Quote
@@ -22,6 +23,7 @@ from app.services.providers.factory import (
     get_history_provider,
     get_profile_provider,
     get_quote_provider,
+    get_yfinance_provider,
 )
 
 
@@ -58,6 +60,16 @@ async def get_quote(symbol: str) -> Quote:
 
     try:
         quote = await get_quote_provider().get_quote(symbol)
+    except UpstreamError as e:
+        if settings.finnhub_api_key:
+            log.warning(
+                "Quote provider failed for %s, falling back to yfinance: %s",
+                symbol,
+                e,
+            )
+            quote = await get_yfinance_provider().get_quote(symbol)
+        else:
+            raise
     except NotFoundError:
         # NSE auto-fallback: user typed "IRFC" → try "IRFC.NS" before failing.
         # Only for bare alpha tickers (skip indices, symbols with suffix/dot).
@@ -107,6 +119,16 @@ async def get_profile(symbol: str) -> CompanyProfile:
 
     try:
         profile = await get_profile_provider().get_profile(symbol)
+    except UpstreamError as e:
+        if settings.finnhub_api_key:
+            log.warning(
+                "Profile provider failed for %s, falling back to yfinance: %s",
+                symbol,
+                e,
+            )
+            profile = await get_yfinance_provider().get_profile(symbol)
+        else:
+            raise
     except NotFoundError:
         if _looks_like_bare_alpha(symbol):
             log.info("Profile miss for %s — retrying with .NS suffix", symbol)
