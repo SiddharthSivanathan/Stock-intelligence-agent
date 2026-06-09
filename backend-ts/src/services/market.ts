@@ -346,13 +346,68 @@ async function profileFromFinnhub(symbol: string): Promise<CompanyProfile> {
   };
 }
 
+/**
+ * Last-ditch fallback: build a minimal CompanyProfile from our `stocks` master.
+ *
+ * Yahoo's crumb handshake silently fails from some IP ranges (Render free tier
+ * is one of them) and Finnhub free tier doesn't track Indian `.NS` symbols.
+ * The stocks master always has at least the name + exchange + currency, which
+ * is enough for the Profile panel to show *something* instead of "No data".
+ */
+async function profileFromMaster(symbol: string): Promise<CompanyProfile> {
+  const { prisma } = await import("../db.js");
+  const upper = symbol.toUpperCase();
+  const row = await prisma.stock.findFirst({
+    where: {
+      OR: [{ symbol: upper }, { baseSymbol: upper }],
+    },
+  });
+  if (!row) {
+    // Nothing in the master either — return a stub so the UI doesn't break.
+    return {
+      symbol,
+      name: symbol,
+      sector: null,
+      industry: null,
+      market_cap: null,
+      country: null,
+      currency: null,
+      website: null,
+      description: null,
+      logo_url: null,
+    };
+  }
+  return {
+    symbol,
+    name: row.name,
+    sector: row.sector,
+    industry: row.industry,
+    market_cap: row.marketCap !== null ? Number(row.marketCap) : null,
+    country: row.country,
+    currency: row.currency,
+    website: null,
+    description: null,
+    logo_url: null,
+  };
+}
+
 export async function getProfile(symbol: string): Promise<CompanyProfile> {
   return remember(`profile:${symbol}`, 86_400, async () => {
+    // 1. Yahoo (rich data) — fails silently on Render free tier sometimes
     try {
       return await profileFromYahoo(symbol);
-    } catch (yahooErr) {
-      if (!config.FINNHUB_API_KEY) throw yahooErr;
-      return profileFromFinnhub(symbol);
+    } catch {
+      /* fall through */
     }
+    // 2. Finnhub (US stocks only)
+    if (config.FINNHUB_API_KEY) {
+      try {
+        return await profileFromFinnhub(symbol);
+      } catch {
+        /* fall through */
+      }
+    }
+    // 3. Stocks master (always works — built from NSE CSV during sync)
+    return profileFromMaster(symbol);
   });
 }
