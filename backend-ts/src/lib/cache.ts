@@ -17,6 +17,19 @@ export const redis = new Redis({
   lazyConnect: true,
   maxRetriesPerRequest: 2,
   enableReadyCheck: true,
+  // On reconnect failures, back off so we don't hammer Redis (or fill logs).
+  retryStrategy: (times) => Math.min(times * 500, 10_000),
+});
+
+// Without this listener, ioredis emits 'error' as an unhandled event and the
+// Node process can crash. We log once at warn level and let the per-call
+// try/catch in getJson/setJson/etc. handle the actual failure semantics.
+let lastErrorAt = 0;
+redis.on("error", (err) => {
+  const now = Date.now();
+  if (now - lastErrorAt < 60_000) return; // throttle to 1 log/min
+  lastErrorAt = now;
+  console.warn(`[redis] connection error (throttled): ${err.message}`);
 });
 
 let connecting: Promise<void> | null = null;
