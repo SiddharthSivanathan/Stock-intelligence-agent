@@ -45,7 +45,7 @@ export default async function wsRoutes(app: FastifyInstance) {
       JSON.stringify({ type: "connected", user_id: userId, subscriptions: initial }),
     );
 
-    socket.on("message", (raw) => {
+    socket.on("message", (raw: any) => {
       try {
         const msg = JSON.parse(raw.toString());
         if (msg.action === "subscribe" && Array.isArray(msg.symbols)) {
