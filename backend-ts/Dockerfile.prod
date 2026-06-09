@@ -1,0 +1,32 @@
+# =============================================================================
+# Prod Dockerfile — TypeScript backend
+# Multi-stage: build TS -> ship only node + dist + prisma client.
+# =============================================================================
+
+# ---- builder ----
+FROM node:20-slim AS builder
+WORKDIR /app
+COPY package.json ./
+RUN npm install --no-audit --no-fund --legacy-peer-deps
+COPY prisma ./prisma
+RUN npx prisma generate
+COPY tsconfig.json ./
+COPY src ./src
+RUN npm run build
+
+# ---- runtime ----
+FROM node:20-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/package.json ./
+RUN npm install --omit=dev --no-audit --no-fund
+COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
+COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/dist ./dist
+EXPOSE 8000
+# Schema is owned by Alembic; we just connect.
+CMD ["node", "dist/server.js"]

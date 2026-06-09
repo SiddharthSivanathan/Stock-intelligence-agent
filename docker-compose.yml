@@ -1,9 +1,10 @@
 # =============================================================================
-# Stack:
+# Stack (100% TypeScript — Python backend removed):
 #   - postgres : transactional store (users, watchlists, insights, agent logs)
 #   - redis    : cache + streams (real-time pipeline)
 #   - chroma   : vector store for the RAG pipeline
-#   - backend  : FastAPI app with hot-reload mounted from ./backend
+#   - backend  : Fastify + TypeScript API with hot-reload mounted from ./backend-ts
+#   - frontend : Vite + React UI
 #
 # Ollama is intentionally NOT in this compose file.
 # Run it natively on Windows (https://ollama.com) and the backend reaches it
@@ -56,36 +57,34 @@ services:
       ANONYMIZED_TELEMETRY: "FALSE"
     restart: unless-stopped
 
+  # Fastify + TypeScript API. Hot-reloads via `tsx watch` on the mounted source.
+  # `prisma db push` at startup is idempotent — creates tables on a fresh DB,
+  # no-op when the schema already matches.
   backend:
     build:
-      context: ./backend
+      context: ./backend-ts
       dockerfile: Dockerfile
     container_name: sis_backend
     env_file: .env
     environment:
-      POSTGRES_HOST: postgres
+      APP_ENV: dev
+      PORT: "8000"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-stockai}:${POSTGRES_PASSWORD:-stockai}@postgres:5432/${POSTGRES_DB:-stockai}?schema=public
       REDIS_HOST: redis
       CHROMA_HOST: chroma
-      # fastembed caches downloaded ONNX models here; volume below persists them
-      FASTEMBED_CACHE_PATH: /var/cache/fastembed
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-      chroma:
-        condition: service_started
     ports:
       - "8000:8000"
     volumes:
-      - ./backend:/app
-      - fastembed_cache:/var/cache/fastembed
-    command: >
-      uvicorn app.main:app
-      --host 0.0.0.0
-      --port 8000
-      --reload
-      --reload-dir /app/app
+      - ./backend-ts/src:/app/src
+      - ./backend-ts/prisma:/app/prisma
+      - backend_node_modules:/app/node_modules
+    command:
+      ["sh", "-c", "npx prisma db push --skip-generate --accept-data-loss && npm run dev"]
     restart: unless-stopped
 
   frontend:
@@ -94,8 +93,11 @@ services:
       dockerfile: Dockerfile
     container_name: sis_frontend
     environment:
-      VITE_API_BASE_URL: http://localhost:8000/api/v1
-      VITE_WS_URL: ws://localhost:8000/api/v1/ws
+      # Point at the public Cloudflare backend tunnel so the published frontend
+      # works from any browser. Revert to http://localhost:8000/api/v1 for
+      # local-only dev.
+      VITE_API_BASE_URL: https://helped-gaming-dos-surgery.trycloudflare.com/api/v1
+      VITE_WS_URL: wss://helped-gaming-dos-surgery.trycloudflare.com/api/v1/ws
     ports:
       - "5173:5173"
     volumes:
@@ -104,12 +106,13 @@ services:
       # source is bind-mounted on top.
       - frontend_node_modules:/app/node_modules
     depends_on:
-      - backend
+      backend:
+        condition: service_started
     restart: unless-stopped
 
 volumes:
   postgres_data:
   redis_data:
   chroma_data:
-  fastembed_cache:
   frontend_node_modules:
+  backend_node_modules:

@@ -15,5 +15,9 @@ export default defineConfig({
     strictPort: true,
     // Polling is needed when the source is on a Windows bind-mount inside Docker.
     watch: { usePolling: true, interval: 300 },
+    // Allow Cloudflare quick-tunnel hostnames so the dev server's host-header
+    // check doesn't block them. `.trycloudflare.com` matches any subdomain so
+    // a new tunnel URL after restart still works without editing this file.
+    allowedHosts: ['.trycloudflare.com', 'localhost', '127.0.0.1'],
   },
 });

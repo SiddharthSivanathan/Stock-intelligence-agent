@@ -1,0 +1,63 @@
+# =============================================================================
+# Render Blueprint — free-tier deploy.
+#
+# Push this repo to GitHub, then on Render: "New" → "Blueprint" → connect repo.
+# Render reads this file and creates the web service automatically.
+#
+# Caveats of the free plan:
+#   - Service sleeps after 15 min of no requests (cold start on next visit).
+#   - The background price producer + alert evaluator will NOT run while asleep.
+#     We disable them via env var `DISABLE_BACKGROUND_WORKERS=true` to avoid
+#     wasting the 750 free hours/month.
+#   - WebSocket connections drop when the service sleeps.
+# =============================================================================
+
+services:
+  - type: web
+    name: stock-intel-backend
+    runtime: node
+    plan: free
+    rootDir: backend-ts
+    buildCommand: npm install --legacy-peer-deps && npx prisma generate && npm run build
+    startCommand: npx prisma db push --skip-generate --accept-data-loss && node dist/server.js
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: APP_ENV
+        value: prod
+      - key: PORT
+        value: "10000"      # Render free tier listens on 10000
+      - key: DISABLE_BACKGROUND_WORKERS
+        value: "true"
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: GEMINI_MODEL
+        value: gemini-2.0-flash
+      # These need to be set manually in the Render dashboard:
+      - key: DATABASE_URL          # from Supabase
+        sync: false
+      - key: REDIS_HOST            # from Upstash
+        sync: false
+      - key: REDIS_PORT            # from Upstash
+        sync: false
+      - key: REDIS_PASSWORD        # from Upstash
+        sync: false
+      - key: GEMINI_API_KEY        # from Google AI Studio
+        sync: false
+      - key: JWT_SECRET            # generate with: openssl rand -hex 32
+        sync: false
+      - key: CORS_ORIGINS          # set to your Vercel URL: ["https://stockintel.vercel.app"]
+        sync: false
+      - key: FINNHUB_API_KEY
+        sync: false
+      - key: NEWSAPI_KEY
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM
+        sync: false

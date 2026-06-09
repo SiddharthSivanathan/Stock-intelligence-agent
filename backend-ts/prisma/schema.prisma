@@ -1,0 +1,256 @@
+// Prisma schema — TypeScript backend.
+// Maps onto the SAME Postgres database the Python backend uses, so both can run
+// against the same data during the rewrite. Table/column names use the snake_case
+// the Python migrations created.
+
+generator client {
+  provider      = "prisma-client-js"
+  // `native` covers Windows for `npm run dev` outside Docker.
+  // `debian-openssl-3.0.x` is what node:20-slim resolves to inside the container.
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              Int      @id @default(autoincrement())
+  email           String   @unique @db.VarChar(255)
+  fullName        String?  @map("full_name") @db.VarChar(255)
+  hashedPassword  String   @map("hashed_password") @db.VarChar(255)
+  isActive        Boolean  @default(true) @map("is_active")
+  isSuperuser     Boolean  @default(false) @map("is_superuser")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  watchlistItems  WatchlistItem[]
+  insights        Insight[]
+  agentLogs       AgentLog[]
+  documents       Document[]
+  recommendations Recommendation[]
+  alertRules      AlertRule[]
+  alertEvents     AlertEvent[]
+  portfolio       Portfolio?
+
+  @@map("users")
+}
+
+model WatchlistItem {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  symbol    String   @db.VarChar(20)
+  notes     String?  @db.VarChar(500)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, symbol], map: "uq_watchlist_items_user_symbol")
+  @@index([userId])
+  @@map("watchlist_items")
+}
+
+model Insight {
+  id         Int      @id @default(autoincrement())
+  userId     Int?     @map("user_id")
+  agentName  String   @map("agent_name") @db.VarChar(50)
+  symbol     String   @db.VarChar(20)
+  sentiment  String?  @db.VarChar(20)
+  confidence Float?
+  score      Float?
+  summary    String?  @db.Text
+  data       Json     @default("{}")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([agentName])
+  @@index([symbol])
+  @@map("insights")
+}
+
+model AgentLog {
+  id         Int      @id @default(autoincrement())
+  userId     Int?     @map("user_id")
+  agentName  String   @map("agent_name") @db.VarChar(50)
+  symbol     String?  @db.VarChar(20)
+  status     String   @db.VarChar(20)
+  durationMs Int      @default(0) @map("duration_ms")
+  error      String?  @db.Text
+  inputData  Json     @default("{}") @map("input_data")
+  outputData Json?    @map("output_data")
+  provider   String?  @db.VarChar(50)
+  model      String?  @db.VarChar(100)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([agentName])
+  @@index([symbol])
+  @@map("agent_logs")
+}
+
+model Document {
+  id             Int      @id @default(autoincrement())
+  userId         Int      @map("user_id")
+  title          String   @db.VarChar(500)
+  filename       String?  @db.VarChar(500)
+  sourceType     String   @map("source_type") @db.VarChar(20)
+  sourceUrl      String?  @map("source_url") @db.VarChar(2000)
+  symbol         String?  @db.VarChar(20)
+  chunkCount     Int      @default(0) @map("chunk_count")
+  status         String   @default("pending") @db.VarChar(20)
+  error          String?  @db.Text
+  collectionName String   @default("documents") @map("collection_name") @db.VarChar(100)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([symbol])
+  @@map("documents")
+}
+
+model Recommendation {
+  id                   Int      @id @default(autoincrement())
+  userId               Int?     @map("user_id")
+  symbol               String   @db.VarChar(20)
+  action               String   @db.VarChar(10)
+  confidence           Float
+  score                Float
+  summary              String   @db.Text
+  reasoning            String   @db.Text
+  contributingSignals  Json     @default("[]") @map("contributing_signals")
+  fullTrace            Json     @default("{}") @map("full_trace")
+  errors               Json     @default("[]")
+  durationMs           Int      @default(0) @map("duration_ms")
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([symbol])
+  @@map("recommendations")
+}
+
+model AlertRule {
+  id                Int       @id @default(autoincrement())
+  userId            Int       @map("user_id")
+  symbol            String    @db.VarChar(20)
+  conditionType     String    @default("price_change_pct") @map("condition_type") @db.VarChar(50)
+  direction         String    @db.VarChar(10)
+  threshold         Float
+  isActive          Boolean   @default(true) @map("is_active")
+  cooldownSeconds   Int       @default(3600) @map("cooldown_seconds")
+  notifyViaWs       Boolean   @default(true) @map("notify_via_ws")
+  notifyViaEmail    Boolean   @default(false) @map("notify_via_email")
+  reRunAnalysis     Boolean   @default(false) @map("re_run_analysis")
+  lastTriggeredAt   DateTime? @map("last_triggered_at") @db.Timestamptz
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([symbol])
+  @@map("alert_rules")
+}
+
+model AlertEvent {
+  id               Int      @id @default(autoincrement())
+  ruleId           Int      @map("rule_id")
+  userId           Int      @map("user_id")
+  symbol           String   @db.VarChar(20)
+  priceAtFire      Float?   @map("price_at_fire")
+  changePctAtFire  Float?   @map("change_pct_at_fire")
+  message          String   @db.Text
+  extra            Json     @default("{}")
+  firedAt          DateTime @default(now()) @map("fired_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([ruleId])
+  @@index([userId])
+  @@index([symbol])
+  @@map("alert_events")
+}
+
+model Portfolio {
+  id            Int      @id @default(autoincrement())
+  userId        Int      @unique(map: "uq_portfolios_user_id") @map("user_id")
+  startingCash  Float    @map("starting_cash")
+  cash          Float
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  positions Position[]
+  trades    Trade[]
+
+  @@map("portfolios")
+}
+
+model Position {
+  id          Int      @id @default(autoincrement())
+  portfolioId Int      @map("portfolio_id")
+  symbol      String   @db.VarChar(20)
+  qty         Float
+  avgCost     Float    @map("avg_cost")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  portfolio Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+
+  @@unique([portfolioId, symbol], map: "uq_positions_pf_sym")
+  @@index([portfolioId])
+  @@map("positions")
+}
+
+/// Universal stock master. One row per (exchange, symbol).
+/// Populated by `npm run sync:stocks` from NSE EQUITY_L.csv + BSE listing.
+model Stock {
+  id            Int      @id @default(autoincrement())
+  symbol        String   @db.VarChar(40)        // Yahoo-style: TCS.NS, RELIANCE.NS, 500325.BO, AAPL
+  baseSymbol    String   @map("base_symbol") @db.VarChar(40)  // TCS, RELIANCE, 500325, AAPL
+  name          String   @db.VarChar(255)
+  exchange      String   @db.VarChar(10)        // NSE | BSE | NYSE | NASDAQ
+  isin          String?  @db.VarChar(20)
+  sector        String?  @db.VarChar(100)
+  industry      String?  @db.VarChar(100)
+  marketCap     BigInt?  @map("market_cap")
+  currency      String?  @db.VarChar(10)
+  country       String?  @db.VarChar(50)
+  isActive      Boolean  @default(true) @map("is_active")
+  lastSyncedAt  DateTime @default(now()) @map("last_synced_at") @db.Timestamptz
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@unique([exchange, baseSymbol], map: "uq_stocks_exch_base")
+  @@index([symbol])
+  @@index([baseSymbol])
+  @@index([name])
+  @@index([isin])
+  @@index([exchange])
+  @@map("stocks")
+}
+
+model Trade {
+  id          Int      @id @default(autoincrement())
+  portfolioId Int      @map("portfolio_id")
+  symbol      String   @db.VarChar(20)
+  side        String   @db.VarChar(10)
+  qty         Float
+  price       Float
+  value       Float
+  executedAt  DateTime @default(now()) @map("executed_at") @db.Timestamptz
+
+  portfolio Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+
+  @@index([portfolioId])
+  @@index([symbol])
+  @@map("trades")
+}
