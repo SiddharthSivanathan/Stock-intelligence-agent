@@ -93,11 +93,8 @@ services:
       dockerfile: Dockerfile
     container_name: sis_frontend
     environment:
-      # Point at the public Cloudflare backend tunnel so the published frontend
-      # works from any browser. Revert to http://localhost:8000/api/v1 for
-      # local-only dev.
-      VITE_API_BASE_URL: https://helped-gaming-dos-surgery.trycloudflare.com/api/v1
-      VITE_WS_URL: wss://helped-gaming-dos-surgery.trycloudflare.com/api/v1/ws
+      VITE_API_BASE_URL: http://localhost:8000/api/v1
+      VITE_WS_URL: ws://localhost:8000/api/v1/ws
     ports:
       - "5173:5173"
     volumes:

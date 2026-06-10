@@ -2,8 +2,12 @@
  * Background price producer.
  *
  *   Every PRODUCER_INTERVAL_SEC the producer:
- *     1. Collects the union of every watchlist symbol across all users
- *        AND every symbol currently being WS-subscribed.
+ *     1. Collects the union of:
+ *        - every watchlist symbol across all users
+ *        - every symbol currently being WS-subscribed
+ *        - every symbol that's the target of an ACTIVE alert rule
+ *       (the last one matters: a rule whose symbol isn't watched would
+ *        otherwise sit dormant forever — never get a tick, never fire)
  *     2. Fetches live quotes (parallel, cached 30 s).
  *     3. XADDs each quote onto `stream:prices`.
  *     4. Fans out to WebSocket clients via the hub.
@@ -25,11 +29,23 @@ const STREAM_MAXLEN = 10_000;
 let started = false;
 
 async function tickOnce() {
-  // union of watchlist symbols and any live-subscribed symbol
-  const dbSyms = (
-    await prisma.watchlistItem.findMany({ select: { symbol: true }, distinct: ["symbol"] })
-  ).map((r) => r.symbol);
-  const all = new Set<string>([...dbSyms, ...watchedSymbols()]);
+  // 1) every distinct symbol on any user's watchlist
+  // 2) every symbol that's the target of an ACTIVE alert rule (so alerts
+  //    fire even when the user forgot to add the symbol to their watchlist)
+  // 3) every symbol any live WS client has subscribed to
+  const [watchlistRows, alertRows] = await Promise.all([
+    prisma.watchlistItem.findMany({ select: { symbol: true }, distinct: ["symbol"] }),
+    prisma.alertRule.findMany({
+      where: { isActive: true },
+      select: { symbol: true },
+      distinct: ["symbol"],
+    }),
+  ]);
+  const all = new Set<string>([
+    ...watchlistRows.map((r) => r.symbol),
+    ...alertRows.map((r) => r.symbol),
+    ...watchedSymbols(),
+  ]);
   if (!all.size) return;
 
   const quotes = await market.getQuotesBatch(Array.from(all));
