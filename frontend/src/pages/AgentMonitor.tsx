@@ -10,6 +10,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { AgentTraceGraph } from '@/components/agents/AgentTraceGraph';
+import { AgentLiveMonitor } from '@/components/agents/AgentLiveMonitor';
 import { useRecommendations } from '@/hooks/api/useRecommendations';
 import { useAgentLogs } from '@/hooks/api/useAgents';
 import { cn } from '@/lib/utils';
@@ -28,9 +29,12 @@ export default function AgentMonitor() {
           Agent Monitor
         </h1>
         <p className="text-sm text-muted mt-1">
-          Replay LangGraph executions and inspect per-agent logs.
+          Watch agents live during an analysis, then replay executions and inspect per-agent logs.
         </p>
       </div>
+
+      {/* Live run — driven by WebSocket agent events while an analysis is in flight. */}
+      <AgentLiveMonitor />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <Card className="lg:col-span-1">

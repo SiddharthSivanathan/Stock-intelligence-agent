@@ -19,6 +19,8 @@ import { SymbolSearch } from '@/components/forms/SymbolSearch';
 import { PriceChart } from '@/components/charts/PriceChart';
 import { RecommendationCard } from '@/components/agents/RecommendationCard';
 import { AgentTraceGraph } from '@/components/agents/AgentTraceGraph';
+import { AgentLiveMonitor } from '@/components/agents/AgentLiveMonitor';
+import { ComprehensiveReport } from '@/components/agents/ComprehensiveReport';
 import {
   useHistory,
   useProfile,
@@ -138,13 +140,13 @@ function StockAnalysisDetail({ symbol, range, rangeIdx, setRangeIdx }: DetailPro
     toast(
       'info',
       'Running full multi-agent analysis…',
-      'This may take 30–90s on local Ollama. The trace will appear when complete.'
+      'Watch the Live Agent Monitor below for real-time progress (~30–60s).'
     );
     try {
       const result = await runAnalysis.mutateAsync(symbol);
       toast(
         'success',
-        `Analysis complete: ${result.action.toUpperCase()}`,
+        `Analysis complete: ${(result.rating ?? result.action).replace('_', ' ').toUpperCase()}`,
         `${(result.confidence * 100).toFixed(0)}% confidence · ${(result.duration_ms / 1000).toFixed(1)}s`
       );
     } catch (err) {
@@ -252,19 +254,28 @@ function StockAnalysisDetail({ symbol, range, rangeIdx, setRangeIdx }: DetailPro
         />
       </div>
 
+      {/* Live multi-agent progress — appears while an analysis is streaming. */}
+      <AgentLiveMonitor symbol={symbol} />
+
       {latestRec && (
         <div>
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-lg font-semibold">Latest recommendation</h2>
+            <h2 className="text-lg font-semibold">Latest analysis</h2>
             <Badge variant="default" className="font-mono">
               {new Date(latestRec.created_at).toLocaleString()}
             </Badge>
           </div>
-          <Tabs defaultValue="summary">
+          <Tabs defaultValue={latestRec.report ? 'report' : 'summary'}>
             <TabsList>
+              {latestRec.report && <TabsTrigger value="report">Report</TabsTrigger>}
               <TabsTrigger value="summary">Summary</TabsTrigger>
               <TabsTrigger value="trace">Trace</TabsTrigger>
             </TabsList>
+            {latestRec.report && (
+              <TabsContent value="report" className="mt-4">
+                <ComprehensiveReport rec={latestRec} />
+              </TabsContent>
+            )}
             <TabsContent value="summary" className="mt-4">
               <RecommendationCard rec={latestRec} />
             </TabsContent>

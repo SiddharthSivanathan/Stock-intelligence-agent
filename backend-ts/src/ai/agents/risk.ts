@@ -8,7 +8,7 @@ import { computeIndicators } from "../indicators.js";
 import { quoteSummary, rawOf } from "../../services/yahooDirect.js";
 
 const schema = baseInsightSchema.extend({
-  risk_level: z.enum(["low", "moderate", "high", "extreme"]),
+  risk_level: z.enum(["low", "moderate", "high", "extreme"]).catch("moderate"),
   factors: z.array(z.string()).default([]),
 });
 

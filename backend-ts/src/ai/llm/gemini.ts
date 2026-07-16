@@ -8,6 +8,38 @@ import { GoogleGenerativeAI, type Content } from "@google/generative-ai";
 import type { ChatMessage, ChatOptions, ChatResponse, LLMProvider } from "./types.js";
 import { config } from "../../config.js";
 
+/**
+ * Retry a Gemini call on transient 429 (free-tier rate limits). The free tier
+ * caps requests-per-minute, and the multi-agent workflow fans out several calls
+ * at once, so short bursts can trip the limit. We honour the server's suggested
+ * retry delay when present, otherwise back off exponentially, capped so a single
+ * analysis never hangs too long.
+ */
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      const msg = (e as Error).message ?? "";
+      const isRateLimit = /\b429\b|Too Many Requests|quota/i.test(msg);
+      // A *daily* quota (RequestsPerDay / "per day") won't clear within a request
+      // lifetime — retrying just burns ~40s per call, so fail fast instead.
+      const isDailyCap = /per\s*day|PerDay|RequestsPerDay/i.test(msg);
+      if (!isRateLimit || isDailyCap || i === attempts - 1) throw e;
+      // Prefer the server's "retry in Xs" hint; cap at 20s so the UI isn't stuck.
+      const hinted = Number(msg.match(/retry in ([\d.]+)s/i)?.[1]);
+      const waitMs = Math.min(
+        Number.isFinite(hinted) ? hinted * 1000 + 500 : (i + 1) * 2500,
+        20_000,
+      );
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+  throw lastErr;
+}
+
 function split(messages: ChatMessage[]): { system: string; history: Content[] } {
   const sys = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
   const history: Content[] = messages
@@ -45,7 +77,7 @@ export class GeminiProvider implements LLMProvider {
     const last = history[history.length - 1];
     const prior = history.slice(0, -1);
     const chat = model.startChat({ history: prior });
-    const result = await chat.sendMessage(last?.parts ?? [{ text: "" }]);
+    const result = await withRetry(() => chat.sendMessage(last?.parts ?? [{ text: "" }]));
     const response = result.response;
     return {
       content: response.text(),

@@ -50,6 +50,16 @@ export function sendAlert(userId: number, payload: Record<string, unknown>) {
   for (const c of clients) if (c.userId === userId) safeSend(c.ws, msg);
 }
 
+/**
+ * Push a live agent-workflow event to every socket belonging to `userId`.
+ * Used by the multi-agent orchestrator so the Agent Monitor can render agent
+ * status (running/completed/failed), progress and confidence in real time.
+ */
+export function sendAgentEvent(userId: number, payload: object) {
+  const msg = JSON.stringify({ type: "agent", data: payload });
+  for (const c of clients) if (c.userId === userId) safeSend(c.ws, msg);
+}
+
 /** Union of symbols subscribed by ANY client — used by the price producer. */
 export function watchedSymbols(): string[] {
   const all = new Set<string>();

@@ -22,16 +22,37 @@ function serialize(r: {
   // The DB stores both `trace` (node timings) and `insights` (per-agent outputs)
   // nested inside `full_trace`. The frontend expects them flattened to the top
   // level — match that shape so the UI works for both Python and TS backends.
-  const full = (r.fullTrace ?? {}) as { trace?: unknown; insights?: unknown };
+  const full = (r.fullTrace ?? {}) as {
+    trace?: unknown;
+    insights?: unknown;
+    report?: unknown;
+    rating?: unknown;
+    actions?: unknown;
+    warnings?: unknown;
+  };
+  // Derive a 5-level rating for rows written before the comprehensive-report
+  // upgrade (they only carried a 3-level `action`).
+  const rating =
+    typeof full.rating === "string"
+      ? full.rating
+      : r.action === "buy"
+      ? "buy"
+      : r.action === "sell"
+      ? "sell"
+      : "hold";
   return {
     id: r.id,
     symbol: r.symbol,
     action: r.action,
+    rating,
     confidence: r.confidence,
     score: r.score,
     summary: r.summary,
     reasoning: r.reasoning,
     contributing_signals: r.contributingSignals,
+    report: (full.report ?? null) as Record<string, unknown> | null,
+    actions: Array.isArray(full.actions) ? full.actions : [],
+    warnings: Array.isArray(full.warnings) ? full.warnings : [],
     trace: Array.isArray(full.trace) ? full.trace : [],
     insights: (full.insights ?? {}) as Record<string, unknown>,
     full_trace: r.fullTrace,

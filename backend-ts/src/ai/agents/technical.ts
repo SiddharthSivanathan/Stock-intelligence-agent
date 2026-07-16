@@ -14,7 +14,8 @@ const momentumSchema = z
   .transform((v) => {
     if (v === "bullish" || v === "bearish") return "strong" as const;
     return v;
-  });
+  })
+  .catch("neutral" as const);
 
 const schema = baseInsightSchema.extend({
   trend: z
@@ -24,7 +25,8 @@ const schema = baseInsightSchema.extend({
       if (v === "bearish") return "downtrend" as const;
       if (v === "neutral") return "sideways" as const;
       return v;
-    }),
+    })
+    .catch("sideways" as const),
   momentum: momentumSchema,
   signals: z.array(z.string()).default([]),
 });

@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 # =============================================================================
 # Production frontend image: build static SPA + serve with nginx.
 # Note: VITE_* env vars are baked at build time (Vite replaces them in the

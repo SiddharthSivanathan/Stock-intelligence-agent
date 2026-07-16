@@ -11,6 +11,7 @@ import { prisma } from "../db.js";
 import { requireAuth } from "../middleware/auth.js";
 import { agents, type AgentName } from "../ai/agents/registry.js";
 import { runWorkflow } from "../ai/workflow/graph.js";
+import { sendAgentEvent } from "../services/hub.js";
 
 const runSchema = z.object({
   symbol: z.string().min(1).max(20),
@@ -49,8 +50,13 @@ export default async function agentRoutes(app: FastifyInstance) {
   app.post("/analyze", async (req, reply) => {
     const parsed = analyzeSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(422).send({ detail: parsed.error.flatten() });
+    const userId = req.currentUser!.id;
     try {
-      const result = await runWorkflow(parsed.data.symbol.toUpperCase(), req.currentUser!.id);
+      // Stream every lifecycle event to the user's WebSocket so the Agent
+      // Monitor renders live status while this request is still in flight.
+      const result = await runWorkflow(parsed.data.symbol.toUpperCase(), userId, {
+        onEvent: (ev) => sendAgentEvent(userId, ev),
+      });
       return result;
     } catch (e) {
       app.log.error(e);

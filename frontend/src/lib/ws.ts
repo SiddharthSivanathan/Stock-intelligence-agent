@@ -72,6 +72,10 @@ export function connectWS(): void {
             msg.data?.message
           );
           break;
+        case 'agent':
+          // Live multi-agent workflow progress → drives the Agent Monitor.
+          if (msg.data) state.applyAgentEvent(msg.data);
+          break;
         case 'pong':
         case 'error':
         default:

@@ -1,15 +1,22 @@
 # =============================================================================
-# Stack (100% TypeScript — Python backend removed):
+# Local development stack (100% TypeScript backend).
 #   - postgres : transactional store (users, watchlists, insights, agent logs)
 #   - redis    : cache + streams (real-time pipeline)
 #   - chroma   : vector store for the RAG pipeline
-#   - backend  : Fastify + TypeScript API with hot-reload mounted from ./backend-ts
+#   - backend  : Fastify + TypeScript API, hot-reloads from ./backend-ts
 #   - frontend : Vite + React UI
 #
-# Ollama is intentionally NOT in this compose file.
-# Run it natively on Windows (https://ollama.com) and the backend reaches it
-# via http://host.docker.internal:11434.
+# Ollama runs natively on the HOST (not in this file). The backend reaches it
+# at http://host.docker.internal:11434 (works on macOS & Windows Docker Desktop).
+# Use `npm run dev` to bring the whole environment up with health checks.
 # =============================================================================
+
+# Shared log rotation so container logs never fill the disk.
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
 
 services:
   postgres:
@@ -24,10 +31,12 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stockai}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stockai} -d ${POSTGRES_DB:-stockai}"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 12
+      start_period: 10s
+    logging: *default-logging
     restart: unless-stopped
 
   redis:
@@ -42,7 +51,9 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 12
+      start_period: 5s
+    logging: *default-logging
     restart: unless-stopped
 
   chroma:
@@ -55,6 +66,16 @@ services:
     environment:
       IS_PERSISTENT: "TRUE"
       ANONYMIZED_TELEMETRY: "FALSE"
+    healthcheck:
+      # Chroma's image is Python-based; use urllib rather than assuming curl.
+      test:
+        - "CMD-SHELL"
+        - "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/v1/heartbeat').status==200 else 1)\" || exit 1"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    logging: *default-logging
     restart: unless-stopped
 
   # Fastify + TypeScript API. Hot-reloads via `tsx watch` on the mounted source.
@@ -77,6 +98,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      chroma:
+        condition: service_started
     ports:
       - "8000:8000"
     volumes:
@@ -85,6 +108,16 @@ services:
       - backend_node_modules:/app/node_modules
     command:
       ["sh", "-c", "npx prisma db push --skip-generate --accept-data-loss && npm run dev"]
+    healthcheck:
+      # node:20-slim ships Node 20 (global fetch). Reports healthy once the API answers.
+      test:
+        - "CMD-SHELL"
+        - "node -e \"fetch('http://localhost:8000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 45s
+    logging: *default-logging
     restart: unless-stopped
 
   frontend:
@@ -104,7 +137,15 @@ services:
       - frontend_node_modules:/app/node_modules
     depends_on:
       backend:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      # node:20-alpine ships busybox wget.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5173/ >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging: *default-logging
     restart: unless-stopped
 
 volumes:

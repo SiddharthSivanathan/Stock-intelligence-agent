@@ -18,6 +18,11 @@ export class OllamaProvider implements LLMProvider {
   }
 
   async chat(messages: ChatMessage[], opts: ChatOptions = {}): Promise<ChatResponse> {
+    // Deterministic defaults tuned for small local models (qwen2.5:3b):
+    //  - temperature 0 → reproducible, schema-faithful JSON
+    //  - format:"json" → Ollama constrains decoding to valid JSON
+    //  - num_ctx 8192  → fit the long analyst prompts without truncation
+    //  - repeat_penalty → stop the model looping on list items
     const { data } = await axios.post(
       `${this.baseUrl}/api/chat`,
       {
@@ -25,9 +30,13 @@ export class OllamaProvider implements LLMProvider {
         messages,
         stream: false,
         format: opts.jsonMode ? "json" : undefined,
+        keep_alive: "30m",
         options: {
-          temperature: opts.temperature,
-          num_predict: opts.maxTokens,
+          temperature: opts.temperature ?? 0,
+          top_p: 0.9,
+          repeat_penalty: 1.1,
+          num_ctx: 8192,
+          num_predict: opts.maxTokens ?? 4096,
         },
       },
       { timeout: 600_000 },
@@ -36,6 +45,12 @@ export class OllamaProvider implements LLMProvider {
       content: data?.message?.content ?? "",
       provider: this.name,
       model: this.model,
+      usage: {
+        prompt_tokens: data?.prompt_eval_count,
+        completion_tokens: data?.eval_count,
+        total_tokens:
+          (data?.prompt_eval_count ?? 0) + (data?.eval_count ?? 0) || undefined,
+      },
     };
   }
 

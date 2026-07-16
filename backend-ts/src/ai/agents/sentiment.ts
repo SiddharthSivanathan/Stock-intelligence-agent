@@ -10,8 +10,10 @@ import { BaseAgent, baseInsightSchema, type AgentContext } from "./base.js";
 // (mistral 7B in particular) almost always pick it when posts are scarce, and
 // rejecting it just forces a retry that returns the same word.
 const schema = baseInsightSchema.extend({
-  crowd_mood: z.enum(["euphoric", "bullish", "mixed", "neutral", "bearish", "panicked"]),
-  discussion_volume: z.enum(["high", "medium", "low"]),
+  crowd_mood: z
+    .enum(["euphoric", "bullish", "mixed", "neutral", "bearish", "panicked"])
+    .catch("neutral"),
+  discussion_volume: z.enum(["high", "medium", "low"]).catch("low"),
   topics: z.array(z.string()).default([]),
 });
 

@@ -11,13 +11,13 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Skeleton } from '@/components/ui/skeleton';
 import { RecommendationCard } from '@/components/agents/RecommendationCard';
-import { SignalCard } from '@/components/agents/SignalCard';
+import { ComprehensiveReport } from '@/components/agents/ComprehensiveReport';
 import { useRecommendations } from '@/hooks/api/useRecommendations';
 import { useInsights } from '@/hooks/api/useInsights';
 import { fmtPct } from '@/lib/utils';
 
 export default function AIInsights() {
-  const [tab, setTab] = useState<'recs' | 'signals'>('recs');
+  const [tab, setTab] = useState<'report' | 'recs' | 'signals'>('report');
 
   return (
     <div className="space-y-6">
@@ -31,11 +31,15 @@ export default function AIInsights() {
         </p>
       </div>
 
-      <Tabs value={tab} onValueChange={(v) => setTab(v as 'recs' | 'signals')}>
+      <Tabs value={tab} onValueChange={(v) => setTab(v as 'report' | 'recs' | 'signals')}>
         <TabsList>
+          <TabsTrigger value="report">Company report</TabsTrigger>
           <TabsTrigger value="recs">Recommendations</TabsTrigger>
           <TabsTrigger value="signals">Signal insights</TabsTrigger>
         </TabsList>
+        <TabsContent value="report" className="mt-4">
+          <LatestReport />
+        </TabsContent>
         <TabsContent value="recs" className="mt-4">
           <RecommendationsList />
         </TabsContent>
@@ -45,6 +49,36 @@ export default function AIInsights() {
       </Tabs>
     </div>
   );
+}
+
+function LatestReport() {
+  const { data: recs = [], isLoading } = useRecommendations({ limit: 20 });
+  const withReport = recs.find((r) => r.report);
+
+  if (isLoading) {
+    return (
+      <div className="space-y-4">
+        <Skeleton className="h-28 w-full" />
+        <Skeleton className="h-64 w-full" />
+      </div>
+    );
+  }
+
+  if (!withReport) {
+    return (
+      <Card>
+        <CardContent className="py-12 text-center text-sm text-muted">
+          No comprehensive report yet. Open a stock on the{' '}
+          <Link to="/analysis" className="text-accent hover:underline">
+            Stock Analysis
+          </Link>{' '}
+          page and click <span className="text-text">Run full analysis</span>.
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return <ComprehensiveReport rec={withReport} />;
 }
 
 function RecommendationsList() {

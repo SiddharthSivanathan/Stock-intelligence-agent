@@ -6,9 +6,18 @@ import { BaseAgent, baseInsightSchema, type AgentContext } from "./base.js";
 import { query as ragQuery } from "../vectorstore/chroma.js";
 import { quoteSummary, rawOf } from "../../services/yahooDirect.js";
 
+// Indices (^DJI), ETFs and thinly-covered tickers often have no fundamentals,
+// so "undetermined" is a valid verdict — allow it instead of throwing. Also
+// tolerate near-miss casing/synonyms the model occasionally returns.
 const schema = baseInsightSchema.extend({
-  valuation: z.enum(["overvalued", "fair", "undervalued"]),
-  financial_health: z.enum(["strong", "moderate", "weak"]),
+  valuation: z
+    .string()
+    .transform((s) => s.toLowerCase().trim())
+    .pipe(z.enum(["overvalued", "fair", "undervalued", "undetermined"]).catch("undetermined")),
+  financial_health: z
+    .string()
+    .transform((s) => s.toLowerCase().trim())
+    .pipe(z.enum(["strong", "moderate", "weak", "undetermined"]).catch("undetermined")),
   key_metrics: z.record(z.union([z.string(), z.number(), z.null()])).default({}),
 });
 
@@ -75,9 +84,11 @@ export class FundamentalsAgent extends BaseAgent<z.infer<typeof schema>> {
           role: "user" as const,
           content:
             `Symbol: ${ctx.symbol}\nMetrics:\n${JSON.stringify(metrics, null, 2)}${ragContext}\n\n` +
+            "If the instrument has no fundamentals (e.g. an index or ETF, or the " +
+            "metrics are empty), use \"undetermined\" for valuation and financial_health.\n" +
             'Reply ONLY with JSON: {"sentiment":"bullish|bearish|neutral","confidence":0..1,' +
-            '"score":-1..1,"summary":"...","valuation":"overvalued|fair|undervalued",' +
-            '"financial_health":"strong|moderate|weak","key_metrics":{...}}',
+            '"score":-1..1,"summary":"...","valuation":"overvalued|fair|undervalued|undetermined",' +
+            '"financial_health":"strong|moderate|weak|undetermined","key_metrics":{...}}',
         },
       ],
     };

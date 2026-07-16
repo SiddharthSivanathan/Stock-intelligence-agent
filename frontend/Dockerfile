@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 # Dev image — runs Vite dev server with HMR. Phase 12 will add a prod image
 # that builds static assets and serves them via nginx.
 FROM node:20-alpine

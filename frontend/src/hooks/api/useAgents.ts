@@ -28,15 +28,70 @@ export interface ContributingSignal {
   note: string;
 }
 
+export type Rating = 'strong_buy' | 'buy' | 'hold' | 'reduce' | 'sell';
+
+/** The comprehensive, explainable company report produced by the orchestrator. */
+export interface CompanyReport {
+  executive_summary: string;
+  business_overview: string;
+  competitive_position: string;
+  industry_analysis: string;
+  swot: {
+    strengths: string[];
+    weaknesses: string[];
+    opportunities: string[];
+    threats: string[];
+  };
+  financial_health_score: number;
+  growth_potential: string;
+  profitability: string;
+  valuation: string;
+  technical_summary: string;
+  sentiment_summary: string;
+  news_impact: string;
+  risk_assessment: string;
+  key_strengths: string[];
+  key_weaknesses: string[];
+  opportunities: string[];
+  risks: string[];
+  long_term_outlook: string;
+  short_term_outlook: string;
+}
+
+export type ActionType =
+  | 'investment'
+  | 'risk_alert'
+  | 'growth_opportunity'
+  | 'competitive_threat'
+  | 'sector_trend'
+  | 'technical_signal'
+  | 'news_event'
+  | 'earnings_impact'
+  | 'watchlist'
+  | 'portfolio';
+
+export interface ActionItem {
+  type: ActionType;
+  title: string;
+  detail: string;
+  confidence: number;
+}
+
 export interface AnalysisResult {
   id: number;
+  run_id?: string;
   symbol: string;
   action: 'buy' | 'hold' | 'sell';
+  rating: Rating;
   confidence: number;
   score: number;
   summary: string;
   reasoning: string;
   contributing_signals: ContributingSignal[];
+  report: CompanyReport | null;
+  actions: ActionItem[];
+  /** Non-fatal degradations (e.g. AI synthesis fell back to heuristics). */
+  warnings?: string[];
   insights: Record<string, Record<string, unknown> | null>;
   trace: Array<{
     node: string;

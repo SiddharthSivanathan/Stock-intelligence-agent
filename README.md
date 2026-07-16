@@ -31,36 +31,133 @@ React · TypeScript · Tailwind · shadcn/ui · Framer Motion
 
 ---
 
-## Quick start
+## Developer Guide
+
+The whole stack runs in Docker and is driven by one command. Everything below is
+verified on **macOS** (Apple Silicon & Intel); it also works on Linux and
+Windows/WSL2.
 
 ### Prerequisites
 
-- **Docker Desktop** running with WSL2 backend
-- **(Optional, recommended) [Ollama](https://ollama.com)** installed natively on Windows
-  - Pull a model: `ollama pull llama3`
-  - Ollama listens on `http://localhost:11434`; the backend reaches it via
-    `http://host.docker.internal:11434` from inside Docker.
+| Tool | Why | Install |
+| --- | --- | --- |
+| **Docker Desktop** | runs postgres, redis, chroma, backend, frontend | https://docker.com |
+| **Node.js ≥ 20** | runs the `npm` dev scripts on your host | `brew install node` |
+| **Ollama** (for AI) | local LLM the agents call | `brew install ollama` |
 
-### First run
+> The AI features use a **local Ollama model** — no API keys, no cloud, no cost.
+> Non-AI features (auth, charts, market data, watchlist, portfolio) work without it.
 
-```powershell
-cd C:\Users\ASUS\stock-intelligence-system
-Copy-Item .env.example .env
-docker compose up --build
+### First-time setup
+
+```bash
+# 1. clone + enter
+git clone <repo-url> stock-intelligence-agent
+cd stock-intelligence-agent
+
+# 2. create your local env from the template (already present as .env for dev)
+cp .env.prod.example .env    # only if .env is missing
+
+# 3. install + start Ollama, then pull the model configured in .env (qwen2.5:3b)
+brew install ollama
+ollama serve &               # or: brew services start ollama
+ollama pull qwen2.5:3b
+
+# 4. one command to build + start + verify everything
+npm run dev
 ```
 
-In another terminal, **apply database migrations** (one-time, then any time the
-schema changes):
+`npm run dev` builds images on first run (a few minutes), then starts the stack,
+waits for every service, and prints a readiness summary.
 
-```powershell
-docker compose exec backend alembic upgrade head
+### Daily workflow
+
+```bash
+npm run dev       # prepare the whole environment, then hand the terminal back
+# … code (backend & frontend hot-reload automatically) …
+npm run logs      # watch logs when you want them (Ctrl+C to stop)
+npm run health    # confirm everything is green
+npm run stop      # stop for the day
 ```
 
-Then open:
+`npm run dev` **never streams logs** — it starts containers detached, waits until
+Postgres/Redis/Chroma/Backend/Frontend are healthy, checks Ollama + the model,
+prints a summary, and exits. Open:
+
+- **Frontend** — http://localhost:5173
+- **Backend API** — http://localhost:8000/api/v1
+- **Health** — `npm run health`
+
+### Available npm commands
+
+| Command | What it does |
+| --- | --- |
+| `npm run dev` | **Start everything**, wait for health, verify Ollama+model, print summary, exit |
+| `npm start` | Start containers detached (no waiting/summary) |
+| `npm run stop` | Stop all containers cleanly |
+| `npm run restart` | Restart all services |
+| `npm run logs` | Stream logs from all containers |
+| `npm run backend` / `npm run frontend` | Stream logs for one service |
+| `npm run status` | Table of container states |
+| `npm run health` | Full pass/fail health check (7 checks) |
+| `npm run shell` | Interactive shell inside the backend container |
+| `npm run db` | `psql` shell into Postgres |
+| `npm run build` | Build/rebuild images |
+| `npm run clean` | Stop + remove containers (keeps data volumes) |
+| `npm run reset` | Wipe volumes and rebuild from scratch |
+| `npm run ollama:check` | Verify (and auto-start) the Ollama server |
+| `npm run ollama:model` | Verify the configured model is installed |
+| `npm run sync:stocks` | Populate the NSE/BSE stock master |
+| `npm run typecheck` | Type-check backend + frontend |
+
+### Ollama setup
+
+- The provider + model are set in `.env`: `LLM_PROVIDER=ollama`, `OLLAMA_MODEL=qwen2.5:3b`.
+- Ollama runs on the **host** at `localhost:11434`; the backend reaches it at
+  `host.docker.internal:11434` (configured automatically).
+- `npm run dev` **auto-starts** Ollama if it's installed but not running. If the
+  model is missing it prints the exact command: `ollama pull qwen2.5:3b`.
+- Want a stronger model? `ollama pull qwen2.5:7b`, set `OLLAMA_MODEL=qwen2.5:7b`
+  in `.env`, then `npm run restart`.
+- Prefer a cloud model instead? Set `LLM_PROVIDER=gemini` (or `openai`) and the
+  matching API key in `.env`.
+
+### Docker setup
+
+- Five services (`postgres`, `redis`, `chroma`, `backend`, `frontend`) defined in
+  [`docker-compose.yml`](docker-compose.yml), each with a health check, log
+  rotation, and `restart: unless-stopped`.
+- Source is bind-mounted, so backend (`tsx watch`) and frontend (Vite HMR)
+  hot-reload without rebuilding.
+- Data persists in named volumes (`postgres_data`, `redis_data`, `chroma_data`).
+  `npm run reset` wipes them for a clean slate.
+
+### Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| `docker: Cannot connect to the Docker daemon` | Start **Docker Desktop**, wait for it, re-run `npm run dev` |
+| Port already in use (5432/8000/5173…) | Stop the other process, or `npm run clean` then `npm run dev` |
+| `Ollama not running` / analysis fails with connection refused | `ollama serve &` (or `brew services start ollama`), then `npm run restart` |
+| `Model missing — run: ollama pull qwen2.5:3b` | Run that command, then `npm run restart` |
+| Analysis returns `429 quota exceeded` | You're on a cloud provider's free tier — switch `LLM_PROVIDER=ollama` or enable billing |
+| Backend changes not picked up | Route changes sometimes need `npm run restart` (tsx hot-reload limitation) |
+| Everything stuck / weird state | `npm run reset` (wipes volumes, rebuilds) |
+
+### Legacy API examples
+
+The verification snippets below are historical (some use PowerShell / the earlier
+Python backend). The endpoints are current; adapt the syntax to `curl` on macOS.
+
+---
+
+## Quick start (API reference)
+
+### Endpoints
 
 - API root — http://localhost:8000/
-- Swagger docs — http://localhost:8000/docs
 - Health check — http://localhost:8000/api/v1/health
+- Readiness — http://localhost:8000/api/v1/ready
 
 ### Verify Phase 1 auth (PowerShell)
 

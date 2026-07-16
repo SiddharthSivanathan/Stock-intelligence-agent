@@ -13,7 +13,7 @@ const schema = baseInsightSchema.extend({
     .array(
       z.object({
         title: z.string(),
-        impact: z.enum(["positive", "negative", "neutral"]),
+        impact: z.enum(["positive", "negative", "neutral"]).catch("neutral"),
       }),
     )
     .default([]),
@@ -71,14 +71,53 @@ async function fetchFinnhub(symbol: string, limit: number): Promise<Headline[]> 
   }
 }
 
+/**
+ * Yahoo Finance headline RSS — the free, keyless fallback. Works for US tickers
+ * and Indian `.NS`/`.BO` symbols. We parse the RSS with a small regex rather
+ * than pulling in an XML dependency.
+ */
+async function fetchYahooRss(symbol: string, limit: number): Promise<Headline[]> {
+  try {
+    const { data } = await axios.get<string>(
+      "https://feeds.finance.yahoo.com/rss/2.0/headline",
+      {
+        params: { s: symbol, region: "US", lang: "en-US" },
+        headers: { "User-Agent": "Mozilla/5.0 stock-intelligence-bot/0.1" },
+        responseType: "text",
+        timeout: 15_000,
+      },
+    );
+    const items = data.match(/<item>[\s\S]*?<\/item>/g) ?? [];
+    const decode = (s: string) =>
+      s
+        .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&#39;|&apos;/g, "'")
+        .replace(/&quot;/g, '"')
+        .trim();
+    return items.slice(0, limit).map((it) => ({
+      title: decode(it.match(/<title>([\s\S]*?)<\/title>/)?.[1] ?? ""),
+      source: "Yahoo Finance",
+      published_at: (it.match(/<pubDate>([\s\S]*?)<\/pubDate>/)?.[1] ?? "").trim(),
+      url: (it.match(/<link>([\s\S]*?)<\/link>/)?.[1] ?? "").trim(),
+    })).filter((h) => h.title);
+  } catch {
+    return [];
+  }
+}
+
 export class NewsAgent extends BaseAgent<z.infer<typeof schema>> {
   readonly name = "news";
   readonly outputSchema = schema;
 
   protected async buildPrompt(ctx: AgentContext) {
     const limit = (ctx.limit as number) ?? 8;
+    // Source priority: NewsAPI > Finnhub > Yahoo Finance RSS (keyless fallback).
     let headlines = await fetchNewsApi(ctx.symbol, limit);
     if (!headlines.length) headlines = await fetchFinnhub(ctx.symbol, limit);
+    if (!headlines.length) headlines = await fetchYahooRss(ctx.symbol, limit);
 
     const list =
       headlines.length === 0

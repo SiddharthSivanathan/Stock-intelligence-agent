@@ -12,6 +12,14 @@ import { z, type ZodTypeAny } from "zod";
 import { prisma } from "../../db.js";
 import { getLLM } from "../llm/factory.js";
 import type { ChatMessage } from "../llm/types.js";
+import {
+  extractJson,
+  looseSentiment,
+  looseConfidence,
+  looseScore,
+  looseString,
+  scoreFromAction,
+} from "../normalize.js";
 
 export interface AgentContext {
   symbol: string;
@@ -26,19 +34,8 @@ export interface AgentResult<T> {
   durationMs: number;
 }
 
-function tryParseJson(raw: string): unknown {
-  // Strip ```json fences a small model sometimes emits.
-  const cleaned = raw
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/```$/i, "")
-    .trim();
-  // Find the first { … } or [ … ] block.
-  const start = cleaned.search(/[{\[]/);
-  if (start < 0) throw new Error("No JSON object found in model output");
-  const end = Math.max(cleaned.lastIndexOf("}"), cleaned.lastIndexOf("]"));
-  if (end < start) throw new Error("Malformed JSON in model output");
-  return JSON.parse(cleaned.slice(start, end + 1));
-}
+/** Max full LLM attempts (initial + repairs) before an agent gives up. */
+const MAX_ATTEMPTS = 3;
 
 export abstract class BaseAgent<TOut extends Record<string, unknown>> {
   abstract readonly name: string;
@@ -65,28 +62,34 @@ export abstract class BaseAgent<TOut extends Record<string, unknown>> {
       passthrough = pt ?? {};
       input = { ...input, prompt_messages: messages.length };
 
-      let resp = await llm.chat(messages, { temperature: 0.2, jsonMode: true });
-      let parsed: unknown;
-      try {
-        parsed = tryParseJson(resp.content);
-      } catch (e) {
-        // single retry: tell the model what went wrong
-        const retry = await llm.chat(
-          [
-            ...messages,
-            { role: "assistant", content: resp.content },
-            {
-              role: "user",
-              content: `Your last output failed JSON parsing: ${(e as Error).message}. Reply ONLY with valid JSON matching the requested schema.`,
-            },
-          ],
-          { temperature: 0, jsonMode: true },
-        );
-        resp = retry;
-        parsed = tryParseJson(retry.content);
+      // Robust parse+validate loop: on any failure we feed the exact error back
+      // to the model and retry, so a small model self-corrects instead of the
+      // agent crashing. Temperature is pinned to 0 on repair for determinism.
+      const convo: ChatMessage[] = [...messages];
+      let validated: TOut | null = null;
+      let lastError = "";
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        const resp = await llm.chat(convo, {
+          temperature: attempt === 0 ? 0.1 : 0,
+          jsonMode: true,
+        });
+        try {
+          const parsed = extractJson(resp.content);
+          validated = finalizeInsight(this.outputSchema.parse(parsed) as TOut);
+          break;
+        } catch (e) {
+          lastError = (e as Error).message;
+          convo.push({ role: "assistant", content: resp.content });
+          convo.push({
+            role: "user",
+            content:
+              `That response was rejected: ${lastError}\n` +
+              "Reply with ONLY a single valid JSON object matching the requested schema. " +
+              "No markdown, no code fences, no commentary. Every required field must be present.",
+          });
+        }
       }
-
-      const validated = this.outputSchema.parse(parsed) as TOut;
+      if (!validated) throw new Error(`agent output invalid after ${MAX_ATTEMPTS} attempts: ${lastError}`);
       const durationMs = Date.now() - startedAt;
 
       // Persist Insight
@@ -138,10 +141,29 @@ export abstract class BaseAgent<TOut extends Record<string, unknown>> {
   }
 }
 
-/** Common JSON envelope reused by every agent. */
+/**
+ * Common JSON envelope reused by every agent. Deliberately lenient: local
+ * models phrase sentiment/score/confidence loosely, so we coerce rather than
+ * reject. Kept a plain ZodObject so agents can `.extend()` it. Missing scores
+ * are synthesised in `run()` (see `finalizeInsight`), not here.
+ */
 export const baseInsightSchema = z.object({
-  sentiment: z.enum(["bullish", "bearish", "neutral"]),
-  confidence: z.number().min(0).max(1),
-  score: z.number().min(-1).max(1),
-  summary: z.string(),
+  sentiment: looseSentiment(),
+  confidence: looseConfidence(0.5),
+  score: looseScore(),
+  summary: looseString(),
 });
+
+/** Fill a synthesised score / summary when the model left them blank. */
+function finalizeInsight<T extends Record<string, unknown>>(o: T): T {
+  const sentiment = (o.sentiment as string) ?? "neutral";
+  const confidence = typeof o.confidence === "number" ? o.confidence : 0.5;
+  const score =
+    typeof o.score === "number"
+      ? o.score
+      : scoreFromAction(
+          sentiment === "bullish" ? "buy" : sentiment === "bearish" ? "sell" : "hold",
+          confidence,
+        );
+  return { ...o, score, summary: (o.summary as string) || "No summary provided." };
+}
