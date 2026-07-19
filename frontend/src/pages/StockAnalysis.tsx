@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { motion } from 'framer-motion';
+import type { SeriesMarker, Time, UTCTimestamp } from 'lightweight-charts';
 import { ArrowDownRight, ArrowUpRight, Building2, Globe, Sparkles } from 'lucide-react';
 import { resolveSymbol, SUGGESTED_INDIAN, SUGGESTED_US } from '@/lib/symbols';
 import {
@@ -16,13 +17,22 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { SymbolSearch } from '@/components/forms/SymbolSearch';
-import { PriceChart } from '@/components/charts/PriceChart';
+import { TradingChart, type IndicatorFlags } from '@/components/charts/TradingChart';
+import {
+  AIScoresPanel, Collapsible, FinancialDashboard, InsightsPanel,
+  PeerComparison, RecommendationsPanel,
+} from '@/components/analysis/DashboardPanels';
+import { buildRecommendations, computeScores, readTechnicals } from '@/lib/analysis';
+import type { Bar } from '@/lib/indicators';
 import { RecommendationCard } from '@/components/agents/RecommendationCard';
 import { AgentTraceGraph } from '@/components/agents/AgentTraceGraph';
 import { AgentLiveMonitor } from '@/components/agents/AgentLiveMonitor';
 import { ComprehensiveReport } from '@/components/agents/ComprehensiveReport';
 import {
+  useCorporateActions,
+  useFundamentals,
   useHistory,
+  useMarketStatus,
   useProfile,
   useQuote,
 } from '@/hooks/api/useStocks';
@@ -32,38 +42,71 @@ import { useStockTick } from '@/hooks/useStockStream';
 import { cn, fmtCompact, fmtMoney, fmtPct } from '@/lib/utils';
 import { toast } from '@/stores/toast';
 
-// yfinance interval limits:
-//   1m   : last 7  days only
-//   2m/5m/15m/30m/60m/90m : last 60 days only
-//   1h   : last 730 days
-//   1d+  : unlimited
-// 10m is NOT a yfinance interval; closest is 15m.
-const RANGES = [
-  // ---- intraday ----
-  { range: '1d',  interval: '1m',  label: '1D · 1m'  },
-  { range: '1d',  interval: '2m',  label: '1D · 2m'  },
-  { range: '1d',  interval: '5m',  label: '1D · 5m'  },
-  { range: '1d',  interval: '15m', label: '1D · 15m' },
-  { range: '5d',  interval: '5m',  label: '5D · 5m'  },
-  { range: '5d',  interval: '15m', label: '5D · 15m' },
-  { range: '5d',  interval: '1h',  label: '5D · 1h'  },
-  // ---- daily ----
-  { range: '1mo', interval: '1d',  label: '1M' },
-  { range: '3mo', interval: '1d',  label: '3M' },
-  { range: '6mo', interval: '1d',  label: '6M' },
-  { range: '1y',  interval: '1d',  label: '1Y' },
-  { range: '5y',  interval: '1wk', label: '5Y' },
-] as const;
+// Range presets (TradingView/Yahoo-style). Each lists the intervals that are
+// valid for that look-back (Yahoo caps intraday history: 1m→7d, others→60d,
+// 1h→730d) and a sensible default interval.
+interface RangeCfg {
+  key: string;
+  range: string;
+  defaultInterval: string;
+  intervals: string[];
+}
+const RANGES: RangeCfg[] = [
+  { key: '1D',  range: '1d',  defaultInterval: '5m',  intervals: ['1m', '3m', '5m', '15m', '30m', '1h'] },
+  { key: '5D',  range: '5d',  defaultInterval: '15m', intervals: ['1m', '3m', '5m', '15m', '30m', '1h'] },
+  { key: '1M',  range: '1mo', defaultInterval: '1h',  intervals: ['30m', '1h', '2h', '4h', '1d'] },
+  { key: '3M',  range: '3mo', defaultInterval: '1d',  intervals: ['1h', '2h', '4h', '1d'] },
+  { key: '6M',  range: '6mo', defaultInterval: '1d',  intervals: ['4h', '1d', '1wk'] },
+  { key: 'YTD', range: 'ytd', defaultInterval: '1d',  intervals: ['1d', '1wk'] },
+  { key: '1Y',  range: '1y',  defaultInterval: '1d',  intervals: ['1d', '1wk'] },
+  { key: '3Y',  range: '3y',  defaultInterval: '1d',  intervals: ['1d', '1wk', '1mo'] },
+  { key: '5Y',  range: '5y',  defaultInterval: '1wk', intervals: ['1d', '1wk', '1mo'] },
+  { key: '10Y', range: '10y', defaultInterval: '1wk', intervals: ['1wk', '1mo'] },
+  { key: 'MAX', range: 'max', defaultInterval: '1mo', intervals: ['1wk', '1mo'] },
+];
+const INTERVAL_LABELS: Record<string, string> = {
+  '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m',
+  '1h': '1H', '2h': '2H', '4h': '4H', '1d': '1D', '1wk': '1W', '1mo': '1M',
+};
 
-// Default to "5D · 15m" — interesting movement, always within yfinance limits
-const DEFAULT_RANGE_IDX = 5;
+const DEFAULT_RANGE_KEY = '1Y';
+const LS = {
+  range: 'sa.range', interval: 'sa.interval', indicators: 'sa.indicators',
+};
+
+const DEFAULT_INDICATORS: IndicatorFlags = {
+  volume: true, sma50: true, sma200: true, rsi: true, macd: true,
+};
+// Overlays drawn on the price pane.
+const OVERLAY_ROW: { key: keyof IndicatorFlags; label: string }[] = [
+  { key: 'sma20', label: 'SMA 20' }, { key: 'sma50', label: 'SMA 50' },
+  { key: 'sma100', label: 'SMA 100' }, { key: 'sma200', label: 'SMA 200' },
+  { key: 'ema20', label: 'EMA 20' }, { key: 'ema50', label: 'EMA 50' },
+  { key: 'ema100', label: 'EMA 100' }, { key: 'ema200', label: 'EMA 200' },
+  { key: 'bb', label: 'Bollinger' }, { key: 'vwap', label: 'VWAP' },
+  { key: 'supertrend', label: 'SuperTrend' }, { key: 'ichimoku', label: 'Ichimoku' },
+  { key: 'fib', label: 'Fibonacci' },
+];
+// Dedicated sub-panes below the chart.
+const PANE_ROW: { key: keyof IndicatorFlags; label: string }[] = [
+  { key: 'volume', label: 'Volume' }, { key: 'rsi', label: 'RSI' },
+  { key: 'macd', label: 'MACD' }, { key: 'stoch', label: 'Stoch RSI' },
+  { key: 'cci', label: 'CCI' }, { key: 'williamsR', label: 'Williams %R' },
+  { key: 'adx', label: 'ADX' }, { key: 'atr', label: 'ATR' }, { key: 'obv', label: 'OBV' },
+];
+
+function loadIndicators(): IndicatorFlags {
+  try {
+    const raw = localStorage.getItem(LS.indicators);
+    if (raw) return JSON.parse(raw) as IndicatorFlags;
+  } catch { /* ignore */ }
+  return DEFAULT_INDICATORS;
+}
 
 export default function StockAnalysis() {
   const { symbol } = useParams<{ symbol?: string }>();
   // Resolve alias here too — handles bookmarked / shared URLs like /analysis/NIFTY.
   const sym = symbol ? resolveSymbol(symbol) : undefined;
-  const [rangeIdx, setRangeIdx] = useState(DEFAULT_RANGE_IDX);
-  const range = RANGES[rangeIdx];
 
   if (!sym) {
     return (
@@ -76,7 +119,7 @@ export default function StockAnalysis() {
     );
   }
 
-  return <StockAnalysisDetail symbol={sym} range={range} rangeIdx={rangeIdx} setRangeIdx={setRangeIdx} />;
+  return <StockAnalysisDetail symbol={sym} />;
 }
 
 // Quick-pick grid of common symbols. Shown on the picker screen + the
@@ -110,21 +153,78 @@ function SuggestionColumn({ title, items }: { title: string; items: typeof SUGGE
   );
 }
 
-interface DetailProps {
-  symbol: string;
-  range: (typeof RANGES)[number];
-  rangeIdx: number;
-  setRangeIdx: (i: number) => void;
-}
+function StockAnalysisDetail({ symbol }: { symbol: string }) {
+  // ---- persisted range / interval / indicators ----
+  const [rangeKey, setRangeKey] = useState<string>(
+    () => localStorage.getItem(LS.range) ?? DEFAULT_RANGE_KEY,
+  );
+  const rangeCfg =
+    RANGES.find((r) => r.key === rangeKey) ??
+    RANGES.find((r) => r.key === DEFAULT_RANGE_KEY)!;
+  const [interval, setIntervalStr] = useState<string>(
+    () => localStorage.getItem(LS.interval) ?? rangeCfg.defaultInterval,
+  );
+  const [indicators, setIndicators] = useState<IndicatorFlags>(loadIndicators);
 
-function StockAnalysisDetail({ symbol, range, rangeIdx, setRangeIdx }: DetailProps) {
+  useEffect(() => { localStorage.setItem(LS.range, rangeKey); }, [rangeKey]);
+  useEffect(() => { localStorage.setItem(LS.interval, interval); }, [interval]);
+  useEffect(() => {
+    localStorage.setItem(LS.indicators, JSON.stringify(indicators));
+  }, [indicators]);
+
+  function pickRange(key: string) {
+    const cfg = RANGES.find((r) => r.key === key)!;
+    setRangeKey(key);
+    if (!cfg.intervals.includes(interval)) setIntervalStr(cfg.defaultInterval);
+  }
+  function toggleIndicator(key: keyof IndicatorFlags) {
+    setIndicators((prev) => ({ ...prev, [key]: !prev[key] }));
+  }
+
   const { data: quote, isLoading: quoteLoading } = useQuote(symbol);
   const { data: profile, isLoading: profileLoading } = useProfile(symbol);
   const { data: candles = [], isLoading: candlesLoading } = useHistory(
     symbol,
-    range.range,
-    range.interval
+    rangeCfg.range,
+    interval,
   );
+  const { data: mktStatus } = useMarketStatus(symbol);
+  const { data: corpActions = [] } = useCorporateActions(symbol, rangeCfg.range);
+  const marketOpen = mktStatus?.status === 'open';
+
+  const markers = useMemo<SeriesMarker<Time>[]>(
+    () =>
+      corpActions.map((a) => {
+        const time = Math.floor(new Date(a.date).getTime() / 1000) as UTCTimestamp;
+        if (a.type === 'dividend')
+          return { time, position: 'belowBar', color: '#34c592', shape: 'circle', text: a.amount != null ? `Div ${a.amount}` : 'Div' };
+        if (a.type === 'split')
+          return { time, position: 'aboveBar', color: '#38bdf8', shape: 'square', text: a.label || 'Split' };
+        return { time, position: 'aboveBar', color: '#eab308', shape: 'arrowDown', text: 'Earnings' };
+      }) as SeriesMarker<Time>[],
+    [corpActions],
+  );
+
+  // Dedicated daily series → stable technical scoring regardless of chart range.
+  const { data: dailyCandles = [] } = useHistory(symbol, '1y', '1d');
+  const analysisBars = useMemo<Bar[]>(
+    () =>
+      dailyCandles
+        .map((c) => ({
+          time: Math.floor(new Date(c.timestamp).getTime() / 1000) as UTCTimestamp,
+          open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume ?? 0,
+        }))
+        .sort((a, b) => (a.time as number) - (b.time as number)),
+    [dailyCandles],
+  );
+  const { data: fundamentals } = useFundamentals(symbol);
+  const tech = useMemo(() => readTechnicals(analysisBars), [analysisBars]);
+  const scores = useMemo(() => computeScores(fundamentals, tech), [fundamentals, tech]);
+  const styleRecs = useMemo(
+    () => buildRecommendations(fundamentals, tech, scores),
+    [fundamentals, tech, scores],
+  );
+
   const liveTick = useStockTick(symbol);
   const { data: recs = [] } = useRecommendations({ symbol, limit: 1 });
   const latestRec = recs[0];
@@ -203,27 +303,47 @@ function StockAnalysisDetail({ symbol, range, rangeIdx, setRangeIdx }: DetailPro
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <Card className="lg:col-span-2">
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle>Price chart</CardTitle>
+          <CardHeader className="space-y-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <CardTitle>Price chart</CardTitle>
+                <MarketBadge status={mktStatus?.status} exchange={mktStatus?.exchange} />
+              </div>
+              {/* interval selector */}
               <Select
-                value={String(rangeIdx)}
-                onChange={(e) => setRangeIdx(Number(e.target.value))}
-                className="h-8 text-xs"
+                value={interval}
+                onChange={(e) => setIntervalStr(e.target.value)}
+                className="h-8 text-xs w-24"
               >
-                {RANGES.map((r, i) => (
-                  <option key={r.range} value={i}>
-                    {r.label}
-                  </option>
+                {rangeCfg.intervals.map((iv) => (
+                  <option key={iv} value={iv}>{INTERVAL_LABELS[iv] ?? iv}</option>
                 ))}
               </Select>
             </div>
+            {/* range buttons */}
+            <div className="flex items-center gap-1 flex-wrap">
+              {RANGES.map((r) => (
+                <button
+                  key={r.key}
+                  type="button"
+                  onClick={() => pickRange(r.key)}
+                  className={cn(
+                    'px-2.5 py-1 rounded text-xs font-mono transition-colors',
+                    r.key === rangeKey
+                      ? 'bg-accent/20 text-accent border border-accent/40'
+                      : 'text-muted hover:text-text hover:bg-panel-2/60 border border-transparent',
+                  )}
+                >
+                  {r.key}
+                </button>
+              ))}
+            </div>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-3">
             {candlesLoading ? (
-              <Skeleton className="w-full" style={{ height: 360 }} />
+              <Skeleton className="w-full" style={{ height: 420 }} />
             ) : candles.length === 0 ? (
-              <div className="min-h-[360px] flex flex-col items-center justify-center gap-4 py-8">
+              <div className="min-h-[420px] flex flex-col items-center justify-center gap-4 py-8">
                 <div className="text-center max-w-md">
                   <p className="text-sm text-muted">
                     No price data available for{' '}
@@ -238,11 +358,21 @@ function StockAnalysisDetail({ symbol, range, rangeIdx, setRangeIdx }: DetailPro
                 <SuggestionGrid />
               </div>
             ) : (
-              <PriceChart
-                candles={candles}
-                symbol={symbol}
-                interval={range.interval}
-              />
+              <>
+                <TradingChart
+                  candles={candles}
+                  symbol={symbol}
+                  interval={interval}
+                  indicators={indicators}
+                  markers={markers}
+                  marketOpen={marketOpen}
+                />
+                {/* indicator toggles */}
+                <div className="space-y-1.5 pt-1">
+                  <IndicatorRow label="Overlays" items={OVERLAY_ROW} indicators={indicators} onToggle={toggleIndicator} />
+                  <IndicatorRow label="Panes" items={PANE_ROW} indicators={indicators} onToggle={toggleIndicator} />
+                </div>
+              </>
             )}
           </CardContent>
         </Card>
@@ -252,6 +382,32 @@ function StockAnalysisDetail({ symbol, range, rangeIdx, setRangeIdx }: DetailPro
           profile={profile}
           quote={quote ?? undefined}
         />
+      </div>
+
+      {/* AI-driven dashboard */}
+      <div className="space-y-4">
+        <Collapsible id="scores" title="AI Investment Scores"
+          subtitle="Calculated from verified fundamentals + live technicals — interpretation, not fabricated data">
+          <AIScoresPanel scores={scores} />
+        </Collapsible>
+        <Collapsible id="recs" title="Recommendations by Style"
+          subtitle="Long-term · Medium · Short · Swing · Intraday">
+          <RecommendationsPanel recs={styleRecs} />
+        </Collapsible>
+        <Collapsible id="insights" title="AI Insights"
+          subtitle="Plain-English explanation of each signal">
+          <InsightsPanel f={fundamentals} tech={tech} />
+        </Collapsible>
+        {fundamentals && (
+          <Collapsible id="fin" title="Financial Dashboard"
+            subtitle={[fundamentals.sector, fundamentals.industry].filter(Boolean).join(' · ')}>
+            <FinancialDashboard f={fundamentals} />
+          </Collapsible>
+        )}
+        <Collapsible id="peers" title="Peer Comparison"
+          subtitle="Normalized 1-year performance + key metrics">
+          <PeerComparison symbol={symbol} />
+        </Collapsible>
       </div>
 
       {/* Live multi-agent progress — appears while an analysis is streaming. */}
@@ -290,6 +446,52 @@ function StockAnalysisDetail({ symbol, range, rangeIdx, setRangeIdx }: DetailPro
         </div>
       )}
     </div>
+  );
+}
+
+function IndicatorRow({ label, items, indicators, onToggle }: {
+  label: string;
+  items: { key: keyof IndicatorFlags; label: string }[];
+  indicators: IndicatorFlags;
+  onToggle: (k: keyof IndicatorFlags) => void;
+}) {
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap">
+      <span className="text-[10px] uppercase tracking-wider text-muted w-14 shrink-0">{label}</span>
+      {items.map(({ key, label: l }) => (
+        <button
+          key={key}
+          type="button"
+          onClick={() => onToggle(key)}
+          className={cn(
+            'px-2 py-0.5 rounded text-[11px] font-mono border transition-colors',
+            indicators[key]
+              ? 'bg-accent/15 text-accent border-accent/40'
+              : 'text-muted border-border hover:text-text hover:border-muted',
+          )}
+        >
+          {l}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function MarketBadge({ status, exchange }: { status?: string; exchange?: string | null }) {
+  if (!status) return null;
+  const open = status === 'open';
+  const label = open ? 'Open' : status === 'pre' ? 'Pre-market' : status === 'post' ? 'Post-market' : 'Closed';
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider border',
+        open ? 'text-accent border-accent/40 bg-accent/10' : 'text-muted border-border bg-panel-2/40',
+      )}
+      title={exchange ? `Exchange: ${exchange}` : undefined}
+    >
+      <span className={cn('h-1.5 w-1.5 rounded-full', open ? 'bg-accent' : 'bg-muted')} />
+      {label}
+    </span>
   );
 }
 

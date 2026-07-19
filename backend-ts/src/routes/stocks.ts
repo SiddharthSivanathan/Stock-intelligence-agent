@@ -165,4 +165,61 @@ export default async function stocksRoutes(app: FastifyInstance) {
       return reply.code(502).send({ detail: "Upstream profile provider failed" });
     }
   });
+
+  // GET /stocks/compare?symbols=TCS.NS,INFY.NS,... — peer metrics side-by-side.
+  app.get<{ Querystring: { symbols?: string } }>("/compare", async (req, reply) => {
+    const list = (req.query.symbols ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 6);
+    if (!list.length) return reply.code(422).send({ detail: "symbols is required" });
+    try {
+      const valid = list.map((s) => validateSymbol(s));
+      return await market.comparePeers(valid);
+    } catch (e) {
+      if (e instanceof InvalidSymbolError) return reply.code(422).send({ detail: e.message });
+      app.log.error(e);
+      return reply.code(502).send({ detail: "Peer comparison provider failed" });
+    }
+  });
+
+  // GET /stocks/:symbol/fundamentals — ratios, statements, analyst, holdings.
+  app.get<{ Params: { symbol: string } }>("/:symbol/fundamentals", async (req, reply) => {
+    try {
+      return await market.getFundamentals(validateSymbol(req.params.symbol));
+    } catch (e) {
+      if (e instanceof InvalidSymbolError) return reply.code(422).send({ detail: e.message });
+      app.log.error(e);
+      return reply.code(502).send({ detail: "Upstream fundamentals provider failed" });
+    }
+  });
+
+  // GET /stocks/:symbol/market-status — open/closed/pre/post for live-update gating.
+  app.get<{ Params: { symbol: string } }>("/:symbol/market-status", async (req, reply) => {
+    try {
+      return await market.getMarketStatus(validateSymbol(req.params.symbol));
+    } catch (e) {
+      if (e instanceof InvalidSymbolError) return reply.code(422).send({ detail: e.message });
+      app.log.error(e);
+      return reply.code(502).send({ detail: "Upstream market-status provider failed" });
+    }
+  });
+
+  // GET /stocks/:symbol/corporate-actions?range=5y — dividends / splits / earnings markers.
+  app.get<{
+    Params: { symbol: string };
+    Querystring: { range?: string };
+  }>("/:symbol/corporate-actions", async (req, reply) => {
+    try {
+      return await market.getCorporateActions(
+        validateSymbol(req.params.symbol),
+        req.query.range ?? "5y",
+      );
+    } catch (e) {
+      if (e instanceof InvalidSymbolError) return reply.code(422).send({ detail: e.message });
+      app.log.error(e);
+      return reply.code(502).send({ detail: "Upstream corporate-actions provider failed" });
+    }
+  });
 }

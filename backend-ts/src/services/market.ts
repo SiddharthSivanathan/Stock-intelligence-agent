@@ -146,12 +146,95 @@ const PERIOD_TO_SECONDS: Record<string, number> = {
   "6mo": 180 * 86400,
   "1y": 365 * 86400,
   "2y": 730 * 86400,
+  "3y": 3 * 365 * 86400,
   "5y": 5 * 365 * 86400,
+  "10y": 10 * 365 * 86400,
   ytd: Math.floor(
     (Date.now() - new Date(new Date().getFullYear(), 0, 1).getTime()) / 1000,
   ),
-  max: 20 * 365 * 86400,
+  max: 30 * 365 * 86400,
 };
+
+// How to satisfy each UI interval. Yahoo natively supports
+// 1m,2m,5m,15m,30m,60m,90m,1h,1d,5d,1wk,1mo,3mo — but NOT 3m,2h,4h, so those
+// are fetched at a finer native interval and resampled server-side.
+//   fetch  = the interval string sent to Yahoo
+//   bucket = if set, resample the fetched bars into this bucket (seconds)
+const INTERVAL_PLAN: Record<string, { fetch: string; bucket?: number }> = {
+  "1m": { fetch: "1m" },
+  "2m": { fetch: "2m" },
+  "3m": { fetch: "1m", bucket: 180 },
+  "5m": { fetch: "5m" },
+  "15m": { fetch: "15m" },
+  "30m": { fetch: "30m" },
+  "60m": { fetch: "60m" },
+  "1h": { fetch: "60m" },
+  "2h": { fetch: "60m", bucket: 2 * 3600 },
+  "4h": { fetch: "60m", bucket: 4 * 3600 },
+  "1d": { fetch: "1d" },
+  "1wk": { fetch: "1wk" },
+  "1w": { fetch: "1wk" },
+  "1mo": { fetch: "1mo" },
+  "1M": { fetch: "1mo" },
+};
+
+// Yahoo caps how far back each intraday interval can go. We clamp the
+// requested range to these limits so the upstream call doesn't return empty.
+const INTERVAL_MAX_SECONDS: Record<string, number> = {
+  "1m": 7 * 86400,
+  "2m": 60 * 86400,
+  "5m": 60 * 86400,
+  "15m": 60 * 86400,
+  "30m": 60 * 86400,
+  "90m": 60 * 86400,
+  "60m": 730 * 86400,
+};
+
+// Aggregate finer candles into fixed-size time buckets (open=first, high=max,
+// low=min, close=last, volume=sum).
+function resampleCandles(candles: Candle[], bucketSec: number): Candle[] {
+  if (!candles.length) return candles;
+  const buckets = new Map<number, Candle>();
+  for (const c of candles) {
+    const t = Math.floor(new Date(c.timestamp).getTime() / 1000);
+    const key = Math.floor(t / bucketSec) * bucketSec;
+    const b = buckets.get(key);
+    if (!b) {
+      buckets.set(key, {
+        timestamp: new Date(key * 1000).toISOString(),
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        volume: c.volume,
+      });
+    } else {
+      b.high = Math.max(b.high, c.high);
+      b.low = Math.min(b.low, c.low);
+      b.close = c.close;
+      b.volume += c.volume;
+    }
+  }
+  return Array.from(buckets.values()).sort(
+    (a, b) => +new Date(a.timestamp) - +new Date(b.timestamp),
+  );
+}
+
+export interface CorporateAction {
+  type: "dividend" | "split" | "earnings";
+  date: string; // ISO
+  label: string;
+  amount?: number;
+}
+
+export interface MarketStatus {
+  symbol: string;
+  status: "open" | "closed" | "pre" | "post";
+  raw_state: string | null;
+  exchange: string | null;
+  timezone: string | null;
+  last_time: string | null;
+}
 
 // A real browser User-Agent. yahoo-finance2 sends a bot-like UA that Yahoo
 // 429s aggressively from container IPs; calling the endpoint directly with a
@@ -160,21 +243,41 @@ const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-async function historyFromYahoo(
+interface YahooChart {
+  candles: Candle[];
+  meta: Record<string, unknown>;
+  events: Record<string, unknown>;
+}
+
+// Raw Yahoo chart fetch — returns candles + meta (market state) + events
+// (dividends/splits). `fetchInterval` is the native Yahoo interval.
+async function chartFromYahoo(
   symbol: string,
-  interval: string,
+  fetchInterval: string,
   range: string,
-): Promise<Candle[]> {
-  const period1 = Math.floor(Date.now() / 1000) - (PERIOD_TO_SECONDS[range] ?? 30 * 86400);
+  withEvents = false,
+): Promise<YahooChart> {
+  // Clamp the look-back to Yahoo's per-interval limit so we don't get an
+  // empty result (e.g. 1m data only goes back 7 days).
+  const wanted = PERIOD_TO_SECONDS[range] ?? 30 * 86400;
+  const maxBack = INTERVAL_MAX_SECONDS[fetchInterval] ?? wanted;
+  const back = Math.min(wanted, maxBack);
+  const period1 = Math.floor(Date.now() / 1000) - back;
   const period2 = Math.floor(Date.now() / 1000);
   const url = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`;
   const { data } = await axios.get(url, {
-    params: { interval, period1, period2, includePrePost: false },
+    params: {
+      interval: fetchInterval,
+      period1,
+      period2,
+      includePrePost: false,
+      ...(withEvents ? { events: "div,splits" } : {}),
+    },
     headers: { "User-Agent": BROWSER_UA, Accept: "application/json" },
     timeout: 30_000,
   });
   const result = data?.chart?.result?.[0];
-  if (!result) return [];
+  if (!result) return { candles: [], meta: {}, events: {} };
   const timestamps: number[] = result.timestamp ?? [];
   const ohlc = result.indicators?.quote?.[0] ?? {};
   const out: Candle[] = [];
@@ -190,7 +293,17 @@ async function historyFromYahoo(
       volume: ohlc.volume?.[i] ?? 0,
     });
   }
-  return out;
+  return { candles: out, meta: result.meta ?? {}, events: result.events ?? {} };
+}
+
+async function historyFromYahoo(
+  symbol: string,
+  interval: string,
+  range: string,
+): Promise<Candle[]> {
+  const plan = INTERVAL_PLAN[interval] ?? { fetch: interval };
+  const { candles } = await chartFromYahoo(symbol, plan.fetch, range);
+  return plan.bucket ? resampleCandles(candles, plan.bucket) : candles;
 }
 
 /**
@@ -296,6 +409,201 @@ export async function getHistory(
     // 3) Single most-recent bar from the live quote (better than empty chart)
     return historyFromQuoteFallback(symbol);
   });
+}
+
+// ---------- Market status ----------
+
+export async function getMarketStatus(symbol: string): Promise<MarketStatus> {
+  return remember(`mktstatus:${symbol}`, 20, async () => {
+    let meta: Record<string, unknown> = {};
+    try {
+      ({ meta } = await chartFromYahoo(symbol, "1d", "5d"));
+    } catch {
+      /* fall through with empty meta */
+    }
+    const rawState = (meta.marketState as string | undefined) ?? null;
+    const map: Record<string, MarketStatus["status"]> = {
+      REGULAR: "open",
+      PRE: "pre",
+      PREPRE: "pre",
+      POST: "post",
+      POSTPOST: "post",
+      CLOSED: "closed",
+    };
+    const t = meta.regularMarketTime as number | undefined;
+    return {
+      symbol,
+      status: rawState ? (map[rawState] ?? "closed") : "closed",
+      raw_state: rawState,
+      exchange: (meta.exchangeName as string | undefined) ?? null,
+      timezone: (meta.timezone as string | undefined) ?? null,
+      last_time: t ? new Date(t * 1000).toISOString() : null,
+    };
+  });
+}
+
+// ---------- Corporate actions ----------
+
+export async function getCorporateActions(
+  symbol: string,
+  range = "5y",
+): Promise<CorporateAction[]> {
+  return remember(`corpactions:${symbol}:${range}`, 60 * 60, async () => {
+    const actions: CorporateAction[] = [];
+    // 1) Dividends + splits come from the chart `events` block.
+    try {
+      const { events } = await chartFromYahoo(symbol, "1d", range, true);
+      const divs = (events.dividends ?? {}) as Record<string, { amount?: number; date?: number }>;
+      for (const d of Object.values(divs)) {
+        if (!d?.date) continue;
+        actions.push({
+          type: "dividend",
+          date: new Date(d.date * 1000).toISOString(),
+          amount: d.amount,
+          label: d.amount != null ? `Dividend ${d.amount}` : "Dividend",
+        });
+      }
+      const splits = (events.splits ?? {}) as Record<string, { date?: number; splitRatio?: string }>;
+      for (const s of Object.values(splits)) {
+        if (!s?.date) continue;
+        actions.push({
+          type: "split",
+          date: new Date(s.date * 1000).toISOString(),
+          label: `Split ${s.splitRatio ?? ""}`.trim(),
+        });
+      }
+    } catch {
+      /* dividends/splits unavailable */
+    }
+    // 2) Earnings dates from quoteSummary.
+    try {
+      const res = await quoteSummary(symbol, ["calendarEvents", "earnings"]);
+      const cal = (res.calendarEvents ?? {}) as Record<string, unknown>;
+      const earnings = (cal.earnings ?? {}) as Record<string, unknown>;
+      const dates = (earnings.earningsDate ?? []) as Array<{ raw?: number }>;
+      for (const d of dates) {
+        if (!d?.raw) continue;
+        actions.push({
+          type: "earnings",
+          date: new Date(d.raw * 1000).toISOString(),
+          label: "Earnings",
+        });
+      }
+    } catch {
+      /* earnings unavailable */
+    }
+    return actions.sort((a, b) => +new Date(a.date) - +new Date(b.date));
+  });
+}
+
+// ---------- Fundamentals ----------
+
+function numOf(v: unknown): number | null {
+  const x = rawOf(v);
+  return typeof x === "number" && Number.isFinite(x) ? x : null;
+}
+
+export async function getFundamentals(symbol: string): Promise<Record<string, unknown>> {
+  return remember(`fundamentals:${symbol}`, 30 * 60, async () => {
+    const r = await quoteSummary(symbol, [
+      "price", "summaryDetail", "defaultKeyStatistics", "financialData",
+      "incomeStatementHistory", "assetProfile",
+    ]);
+    const price = (r.price ?? {}) as Record<string, unknown>;
+    const sd = (r.summaryDetail ?? {}) as Record<string, unknown>;
+    const ks = (r.defaultKeyStatistics ?? {}) as Record<string, unknown>;
+    const fd = (r.financialData ?? {}) as Record<string, unknown>;
+    const ap = (r.assetProfile ?? {}) as Record<string, unknown>;
+    const incRaw = ((r.incomeStatementHistory as Record<string, unknown> | undefined)
+      ?.incomeStatementHistory ?? []) as Array<Record<string, unknown>>;
+    const income_statement = incRaw.map((o) => {
+      const e = rawOf(o.endDate);
+      return {
+        fy: typeof e === "number" ? new Date(e * 1000).getUTCFullYear() : null,
+        revenue: numOf(o.totalRevenue),
+        net_income: numOf(o.netIncome),
+        gross_profit: numOf(o.grossProfit),
+        operating_income: numOf(o.operatingIncome),
+        ebit: numOf(o.ebit),
+      };
+    });
+    return {
+      symbol,
+      name: rawOf(price.longName) ?? rawOf(price.shortName) ?? symbol,
+      currency: rawOf(price.currency),
+      exchange: rawOf(price.exchangeName),
+      sector: rawOf(ap.sector),
+      industry: rawOf(ap.industry),
+      market_cap: numOf(price.marketCap),
+      enterprise_value: numOf(ks.enterpriseValue),
+      beta: numOf(sd.beta),
+      shares_outstanding: numOf(ks.sharesOutstanding),
+      float_shares: numOf(ks.floatShares),
+      fifty_two_week_high: numOf(sd.fiftyTwoWeekHigh),
+      fifty_two_week_low: numOf(sd.fiftyTwoWeekLow),
+      avg_volume: numOf(sd.averageVolume),
+      valuation: {
+        pe: numOf(sd.trailingPE), forward_pe: numOf(sd.forwardPE), peg: numOf(ks.pegRatio),
+        pb: numOf(ks.priceToBook), ps: numOf(sd.priceToSalesTrailing12Months),
+        ev_ebitda: numOf(ks.enterpriseToEbitda), dividend_yield: numOf(sd.dividendYield),
+        eps_trailing: numOf(ks.trailingEps), eps_forward: numOf(ks.forwardEps), book_value: numOf(ks.bookValue),
+      },
+      profitability: {
+        gross_margin: numOf(fd.grossMargins), operating_margin: numOf(fd.operatingMargins),
+        ebitda_margin: numOf(fd.ebitdaMargins), net_margin: numOf(fd.profitMargins),
+        roe: numOf(fd.returnOnEquity), roa: numOf(fd.returnOnAssets),
+      },
+      health: {
+        total_cash: numOf(fd.totalCash), total_debt: numOf(fd.totalDebt),
+        debt_to_equity: numOf(fd.debtToEquity), current_ratio: numOf(fd.currentRatio),
+        quick_ratio: numOf(fd.quickRatio), free_cash_flow: numOf(fd.freeCashflow),
+        operating_cash_flow: numOf(fd.operatingCashflow), total_revenue: numOf(fd.totalRevenue), ebitda: numOf(fd.ebitda),
+      },
+      growth: { revenue_growth: numOf(fd.revenueGrowth), earnings_growth: numOf(fd.earningsGrowth) },
+      analyst: {
+        target_mean: numOf(fd.targetMeanPrice), target_high: numOf(fd.targetHighPrice),
+        target_low: numOf(fd.targetLowPrice), recommendation: rawOf(fd.recommendationKey),
+        analysts: numOf(fd.numberOfAnalystOpinions),
+      },
+      holdings: { insiders: numOf(ks.heldPercentInsiders), institutions: numOf(ks.heldPercentInstitutions) },
+      income_statement,
+    };
+  });
+}
+
+// ---------- Peer comparison ----------
+
+export async function comparePeers(symbols: string[]): Promise<Array<Record<string, unknown>>> {
+  const results = await Promise.allSettled(
+    symbols.map((s) =>
+      remember(`peer:${s}`, 30 * 60, async (): Promise<Record<string, unknown>> => {
+        const r = await quoteSummary(s, ["price", "summaryDetail", "financialData", "defaultKeyStatistics"]);
+        const price = (r.price ?? {}) as Record<string, unknown>;
+        const sd = (r.summaryDetail ?? {}) as Record<string, unknown>;
+        const fd = (r.financialData ?? {}) as Record<string, unknown>;
+        const ks = (r.defaultKeyStatistics ?? {}) as Record<string, unknown>;
+        return {
+          symbol: s,
+          name: rawOf(price.longName) ?? rawOf(price.shortName) ?? s,
+          currency: rawOf(price.currency),
+          market_cap: numOf(price.marketCap),
+          pe: numOf(sd.trailingPE),
+          forward_pe: numOf(sd.forwardPE),
+          pb: numOf(ks.priceToBook),
+          roe: numOf(fd.returnOnEquity),
+          net_margin: numOf(fd.profitMargins),
+          revenue_growth: numOf(fd.revenueGrowth),
+          earnings_growth: numOf(fd.earningsGrowth),
+          debt_to_equity: numOf(fd.debtToEquity),
+          dividend_yield: numOf(sd.dividendYield),
+          recommendation: rawOf(fd.recommendationKey),
+        };
+      }),
+    ),
+  );
+  return results
+    .filter((r): r is PromiseFulfilledResult<Record<string, unknown>> => r.status === "fulfilled")
+    .map((r) => r.value);
 }
 
 // ---------- Profile ----------

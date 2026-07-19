@@ -1,29 +1,34 @@
 /**
  * Stock master sync — populates the `stocks` table from public sources.
  *
- *   NSE  → https://archives.nseindia.com/content/equities/EQUITY_L.csv   (~2000 rows)
+ *   NSE  → https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv  (~2000 rows)
+ *          (the old `archives.nseindia.com` host now returns Akamai 503s)
  *   BSE  → https://api.bseindia.com/BseIndiaAPI/api/ListOfScripsCanInfo/w?Group=&Scripcode=
- *          (we use the smaller `ListofScripCodeAdvSearchData` JSON for speed)
- *   US   → static seed of S&P 100 / NASDAQ majors (a full SEC sync would be a
- *          separate script — out of scope for this pass)
+ *          (best-effort; BSE bot-blocks datacenter/non-India IPs)
+ *   US   → official NASDAQ Trader symbol directories — the full US-listed
+ *          universe (~13k tickers across NASDAQ / NYSE / NYSE American / Arca).
+ *          Falls back to a 30-name majors seed if the files are unreachable.
+ *
+ * Every source is wrapped so a single failure never aborts the run — we always
+ * upsert whatever we could fetch plus the index seeds.
  *
  * Idempotent: upserts on (exchange, base_symbol). Safe to run daily.
  *
- *   docker compose exec backend-ts npm run sync:stocks
+ *   docker compose exec backend npm run sync:stocks
  */
 import axios from "axios";
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 " +
+  "(KHTML, like Gecko) Version/17.0 Safari/605.1.15";
 
 interface SeedRow {
   symbol: string;
   baseSymbol: string;
   name: string;
-  exchange: "NSE" | "BSE" | "NYSE" | "NASDAQ";
+  exchange: string;
   isin?: string;
   sector?: string | null;
   industry?: string | null;
@@ -35,14 +40,33 @@ interface SeedRow {
 
 async function fetchNseEquities(): Promise<SeedRow[]> {
   console.log("→ Fetching NSE EQUITY_L.csv …");
-  const { data } = await axios.get<string>(
+  // Primary host is the current CDN; the legacy host is kept as a fallback.
+  const urls = [
+    "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv",
     "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
-    {
-      headers: { "User-Agent": UA, Accept: "text/csv,*/*" },
-      responseType: "text",
-      timeout: 60_000,
-    },
-  );
+  ];
+  let data: string | undefined;
+  for (const url of urls) {
+    try {
+      const res = await axios.get<string>(url, {
+        headers: { "User-Agent": UA, Accept: "text/csv,*/*" },
+        responseType: "text",
+        timeout: 60_000,
+      });
+      // A blocked request comes back as an HTML error page, not CSV.
+      if (typeof res.data === "string" && res.data.startsWith("SYMBOL")) {
+        data = res.data;
+        break;
+      }
+      console.warn(`  ${url} returned a non-CSV body; trying next source.`);
+    } catch (e) {
+      console.warn(`  ${url} failed (${(e as Error).message}); trying next source.`);
+    }
+  }
+  if (!data) {
+    console.warn("  NSE fetch failed on all hosts; skipping NSE this run.");
+    return [];
+  }
   // Header: SYMBOL, NAME OF COMPANY, SERIES, DATE OF LISTING, PAID UP VALUE,
   //         MARKET LOT, ISIN NUMBER, FACE VALUE
   const lines = data.trim().split(/\r?\n/);
@@ -113,8 +137,103 @@ async function fetchBseEquities(): Promise<SeedRow[]> {
   }
 }
 
-// -------------------- US (small seed) --------------------
+// -------------------- US (full listings) --------------------
 
+// NYSE Trader "otherlisted" exchange codes → short display names (≤10 chars,
+// the DB column is VarChar(10)).
+const OTHER_EXCHANGE: Record<string, string> = {
+  A: "NYSE AMER",
+  N: "NYSE",
+  P: "NYSE ARCA",
+  Z: "BATS",
+  V: "IEX",
+};
+
+// A NASDAQ Trader symbol is skippable if it's a test issue, a directory
+// footer line, or a non-common special security (warrants / units / rights /
+// preferreds carry a `$` in the ticker).
+function usSymbolOk(symbol: string, name: string, testIssue: string): boolean {
+  if (!symbol || !name) return false;
+  if (testIssue === "Y") return false;
+  if (symbol.includes("$")) return false;
+  if (name.startsWith("File Creation Time")) return false;
+  return true;
+}
+
+async function fetchUsFile(url: string): Promise<string[]> {
+  const { data } = await axios.get<string>(url, {
+    headers: { "User-Agent": UA, Accept: "text/plain,*/*" },
+    responseType: "text",
+    timeout: 60_000,
+  });
+  return String(data).trim().split(/\r?\n/);
+}
+
+async function fetchUsListings(): Promise<SeedRow[]> {
+  console.log("→ Fetching US listings from NASDAQ Trader …");
+  const rows: SeedRow[] = [];
+  const seen = new Set<string>();
+  const push = (r: SeedRow) => {
+    const key = `${r.exchange}:${r.baseSymbol}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    rows.push(r);
+  };
+  // Yahoo uses `-` for class shares where NASDAQ Trader uses `.` (e.g. BRK.B → BRK-B).
+  const yahooize = (s: string) => s.replace(/\./g, "-");
+
+  try {
+    // nasdaqlisted.txt: Symbol|Security Name|Market Category|Test Issue|...|ETF|...
+    const nasdaq = await fetchUsFile(
+      "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
+    );
+    for (const line of nasdaq.slice(1)) {
+      const c = line.split("|");
+      const [symbol, name, , testIssue] = c;
+      if (!usSymbolOk(symbol, name, testIssue)) continue;
+      push({
+        symbol: yahooize(symbol),
+        baseSymbol: symbol,
+        name: name.trim(),
+        exchange: "NASDAQ",
+        currency: "USD",
+        country: "United States",
+      });
+    }
+
+    // otherlisted.txt: ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|...|Test Issue|...
+    const other = await fetchUsFile(
+      "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt",
+    );
+    for (const line of other.slice(1)) {
+      const c = line.split("|");
+      const [symbol, name, exch, , , , testIssue] = c;
+      if (!usSymbolOk(symbol, name, testIssue)) continue;
+      push({
+        symbol: yahooize(symbol),
+        baseSymbol: symbol,
+        name: name.trim(),
+        exchange: OTHER_EXCHANGE[exch] ?? "NYSE",
+        currency: "USD",
+        country: "United States",
+      });
+    }
+  } catch (e) {
+    console.warn(
+      `  US listings fetch failed (${(e as Error).message}); falling back to majors seed.`,
+    );
+    return US_SEED;
+  }
+
+  if (rows.length === 0) {
+    console.warn("  US listings came back empty; falling back to majors seed.");
+    return US_SEED;
+  }
+  console.log(`  got ${rows.length} US listings`);
+  return rows;
+}
+
+// Fallback used only when the NASDAQ Trader files are unreachable.
 const US_SEED: SeedRow[] = [
   ["AAPL", "Apple Inc.", "Technology"],
   ["MSFT", "Microsoft Corporation", "Technology"],
@@ -206,7 +325,8 @@ async function main() {
   console.log("=== Stock master sync ===");
   const nse = await fetchNseEquities();
   const bse = await fetchBseEquities();
-  const all = [...nse, ...bse, ...US_SEED, ...INDEX_SEED];
+  const us = await fetchUsListings();
+  const all = [...nse, ...bse, ...us, ...INDEX_SEED];
   console.log(`Upserting ${all.length} rows …`);
   await upsertBatch(all);
   const total = await prisma.stock.count();
